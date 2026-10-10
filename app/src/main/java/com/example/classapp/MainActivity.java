@@ -13,8 +13,10 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
+import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
@@ -36,14 +38,17 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.UUID;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 public class MainActivity extends Activity {
-    static final int PICK_STUDENTS = 10, PICK_CLASSES = 11, PICK_REPORT = 12, PICK_BACKUP = 13, PICK_SAVE_BACKUP = 14;
+    static final int PICK_STUDENTS = 10, PICK_CLASSES = 11, PICK_REPORT = 12, PICK_BACKUP = 13, PICK_SAVE_BACKUP = 14, PICK_EXPORT = 15;
     static final int MAX_FILE = 20 * 1024 * 1024;
 
     interface Submit { boolean go(); }
@@ -53,7 +58,27 @@ public class MainActivity extends Activity {
         int fallback, undated;
     }
 
+    static final class Hit {
+        final boolean absent, late;
+        final String text; // as shown (heading lines included)
+        final String body; // remark lines only (used by the statistical summary)
+
+        Hit(boolean absent, boolean late, String text, String body) {
+            this.absent = absent;
+            this.late = late && !absent;
+            this.text = text;
+            this.body = body;
+        }
+    }
+
+    static final class StudentOut {
+        String summary = "", details = "";
+        boolean found;
+    }
+
     Store st;
+    String fClass = "", fTeacher = ""; // filters of the manager's overall report
+    String pendingExport = "";
     LinearLayout root;
     Runnable backAction;
 
@@ -230,7 +255,7 @@ public class MainActivity extends Activity {
 
     void home() {
         base("کلاس", null);
-        TextView v = text("مدیریت ساده آموزشگاه زبان\nنسخه 1.5 • Android", 16);
+        TextView v = text("مدیریت ساده آموزشگاه زبان\nنسخه 1.8 • Android", 16);
         v.setGravity(Gravity.CENTER);
         btn("👨‍🎓 زبان‌آموزان", x -> studentsPage());
         btn("🏫 کلاس‌ها", x -> classesPage());
@@ -495,8 +520,10 @@ public class MainActivity extends Activity {
 
     void reportsPage() {
         base("گزارش روزانه", this::home);
+        btn("📝 ساخت گزارش با فرم (تیک‌دار)", x -> reportForm(-1, "", JalaliDate.todayJalali(), "", new ReportForm()));
+        btn("📋 ورود گزارش از متن (چسباندن از پیام‌رسان)", x -> pasteDialog());
         btn("📥 ورود فایل متنی (.txt)", x -> pick(PICK_REPORT));
-        btn("✍️ نوشتن گزارش جدید", x -> reportDialog(-1, new JSONObject()));
+        btn("✍️ نوشتن گزارش متنی (دستی)", x -> reportDialog(-1, new JSONObject()));
         backBtn();
         text("گزارش‌ها: " + st.reports.length() + "\nتاریخ هر گزارش (شمسی یا میلادی) مبنای گزارش هفتگی و ماهانه است؛ متن اصلی تغییر نمی‌کند.", 14);
         final ArrayList<Integer> order = new ArrayList<>();
@@ -504,22 +531,45 @@ public class MainActivity extends Activity {
         Collections.sort(order, (a, b) -> Long.compare(reportDay(st.reports.optJSONObject(b)), reportDay(st.reports.optJSONObject(a))));
         for (final int i : order) {
             JSONObject o = st.reports.optJSONObject(i);
-            String cls = o.optString("class");
-            row(o.optString("date") + (cls.isEmpty() ? "" : " — " + cls), x -> showReport(i));
+            String cls = o.optString("class"), t = o.optString("teacher");
+            row(o.optString("date") + (cls.isEmpty() ? "" : " — " + cls) + (t.isEmpty() ? "" : " — " + t), x -> showReport(i));
         }
     }
 
     void showReport(final int i) {
         final JSONObject o = st.reports.optJSONObject(i);
         if (o == null) return;
-        new AlertDialog.Builder(this).setTitle(o.optString("date") + " — " + o.optString("class")).setMessage(o.optString("text"))
-                .setPositiveButton("ویرایش", (d, w) -> reportDialog(i, o))
-                .setNeutralButton("حذف", (d, w) -> confirm("حذف گزارش", "این گزارش حذف شود؟", "حذف", () -> {
-                    st.reports.remove(i);
-                    st.save();
-                    reportsPage();
-                }))
-                .setNegativeButton("بستن", null).show();
+        base(o.optString("date") + (o.optString("class").isEmpty() ? "" : " — " + o.optString("class")), this::reportsPage);
+        btn("✏️ ویرایش", x -> editReport(i));
+        exportButtons("report-" + o.optString("date").replace('/', '-'), () -> o.optString("text"));
+        btn("🗑️ حذف گزارش", x -> confirm("حذف گزارش", "این گزارش حذف شود؟", "حذف", () -> {
+            st.reports.remove(i);
+            st.save();
+            reportsPage();
+        }));
+        backBtn();
+        if (!o.optString("teacher").isEmpty()) text("معلم: " + o.optString("teacher"), 14);
+        text(o.optString("text"), 16).setTextIsSelectable(true);
+    }
+
+    void editReport(int i) {
+        JSONObject o = st.reports.optJSONObject(i);
+        if (o == null) return;
+        JSONObject f = o.optJSONObject("form");
+        if (f != null) reportForm(i, o.optString("teacher"), o.optString("date"), o.optString("class"), ReportForm.fromJson(f));
+        else reportDialog(i, o);
+    }
+
+    /** Stores (or replaces) a report; returns the object that was written. */
+    JSONObject commitReport(int idx, JSONObject draft, String date, String cls, String teacher, String text, JSONObject form) throws JSONException {
+        JSONObject o = idx >= 0 ? st.reports.optJSONObject(idx) : draft;
+        o.put("date", date).put("class", cls).put("teacher", teacher).put("text", text);
+        if (form != null) o.put("form", form);
+        if (o.optString("id").isEmpty()) o.put("id", UUID.randomUUID().toString());
+        if (o.optLong("createdAt", 0) == 0) o.put("createdAt", System.currentTimeMillis());
+        if (idx < 0) st.reports.put(o);
+        st.save();
+        return o;
     }
 
     /** idx >= 0 edits st.reports[idx]; idx < 0 creates a new report from the draft (saved only on Save). */
@@ -528,6 +578,7 @@ public class MainActivity extends Activity {
         if (o == null) return;
         String d0 = o.optString("date");
         final EditText date = edit("تاریخ (مثلاً 1405/07/13)", d0.isEmpty() ? JalaliDate.todayJalali() : d0, false);
+        final EditText teacher = edit("نام معلم", o.optString("teacher"), false);
         final ArrayList<String> opts = new ArrayList<>();
         opts.add("(بدون کلاس)");
         for (int i = 0; i < st.classes.length(); i++) opts.add(st.classes.optJSONObject(i).optString("name"));
@@ -549,32 +600,336 @@ public class MainActivity extends Activity {
         body.setMinLines(10);
         LinearLayout l = form();
         l.addView(date);
+        l.addView(teacher);
         l.addView(cls);
         l.addView(body);
         formDialog("گزارش روزانه", l, () -> {
-            String text = body.getText().toString();
+            final String text = body.getText().toString();
             if (text.trim().isEmpty()) {
                 toast("متن گزارش خالی است");
                 return false;
             }
-            String ds = date.getText().toString().trim();
-            if (ds.isEmpty()) ds = JalaliDate.todayJalali();
+            String ds0 = date.getText().toString().trim();
+            final String ds = ds0.isEmpty() ? JalaliDate.todayJalali() : ds0;
             int p = cls.getSelectedItemPosition();
+            final String cn = p <= 0 ? "" : opts.get(p);
+            final String tn = teacher.getText().toString().trim();
+            final Runnable done = () -> {
+                if (JalaliDate.parseEpochDay(ds) == JalaliDate.INVALID) {
+                    toast("تاریخ قابل تشخیص نبود؛ در گزارش‌های دوره‌ای بر اساس زمان ثبت حساب می‌شود");
+                }
+                reportsPage();
+            };
+            final int dup = idx < 0 ? Reports.findDuplicate(st.reports, ds, cn, tn, -1) : -1;
             try {
-                o.put("date", ds).put("class", p <= 0 ? "" : opts.get(p)).put("text", text);
-                if (o.optLong("createdAt", 0) == 0) o.put("createdAt", System.currentTimeMillis());
-                if (idx < 0) st.reports.put(o);
+                if (dup >= 0) {
+                    confirm("گزارش تکراری", "برای همین تاریخ، کلاس و معلم قبلاً گزارشی ثبت شده است. جایگزین شود؟", "جایگزین", () -> {
+                        try {
+                            commitReport(dup, null, ds, cn, tn, text, null);
+                        } catch (JSONException e) {
+                            toast("خطا در ذخیره");
+                            return;
+                        }
+                        done.run();
+                    });
+                } else {
+                    commitReport(idx, o, ds, cn, tn, text, null);
+                    done.run();
+                }
             } catch (JSONException e) {
                 toast("خطا در ذخیره");
                 return false;
             }
-            st.save();
-            if (JalaliDate.parseEpochDay(ds) == JalaliDate.INVALID) {
-                toast("تاریخ قابل تشخیص نبود؛ در گزارش‌های دوره‌ای بر اساس زمان ثبت حساب می‌شود");
-            }
-            reportsPage();
             return true;
         });
+    }
+
+    /** Paste a report received in a messenger. */
+    void pasteDialog() {
+        final EditText e = edit("متن گزارش را اینجا بچسبانید", "", true);
+        e.setMinLines(10);
+        LinearLayout l = form();
+        l.addView(e);
+        new AlertDialog.Builder(this).setTitle("ورود گزارش از متن").setView(scroll(l))
+                .setPositiveButton("ادامه", (d, w) -> {
+                    String t = e.getText().toString();
+                    if (t.trim().isEmpty()) toast("متنی وارد نشده است");
+                    else importReportText(t);
+                }).setNegativeButton("لغو", null).show();
+    }
+
+    /** Reads teacher, date and class from the text, then lets the manager check them before saving. */
+    void importReportText(String txt) {
+        try {
+            JSONObject draft = new JSONObject();
+            String d = JalaliDate.findDate(txt);
+            String cls = Reports.matchClass(st, Reports.parseClass(txt));
+            if (cls.isEmpty()) cls = Reports.inferClass(st, txt);
+            draft.put("date", d != null ? d : JalaliDate.todayJalali()).put("class", cls)
+                    .put("teacher", Reports.parseTeacher(txt)).put("text", txt);
+            reportDialog(-1, draft);
+        } catch (JSONException e) {
+            toast("خطا در خواندن گزارش");
+        }
+    }
+
+    // ---------- tick-box report form ----------
+
+    /** Name printed in reports: the first name, or the full name when another student shares the first name. */
+    String displayName(String code) {
+        for (int i = 0; i < st.students.length(); i++) {
+            JSONObject o = st.students.optJSONObject(i);
+            if (!o.optString("code").equals(code)) continue;
+            String f = o.optString("first").trim();
+            return clashCount(i, Text.norm(f)) == 0 ? f : f + " " + o.optString("last").trim();
+        }
+        return code;
+    }
+
+    List<String> membersOf(String cls) {
+        List<String> out = new ArrayList<>();
+        for (int i = 0; i < st.classes.length(); i++) {
+            JSONObject c = st.classes.optJSONObject(i);
+            if (!c.optString("name").equals(cls)) continue;
+            JSONArray m = c.optJSONArray("students");
+            for (int j = 0; m != null && j < m.length(); j++) if (st.student(m.optString(j)) != null) out.add(m.optString(j));
+            break;
+        }
+        return out;
+    }
+
+    /** The widgets of one open form; read back with collect(). */
+    final class FormUi {
+        Spinner teacher, cls;
+        EditText date, book, wb, other, hw, general;
+        final List<String> members = new ArrayList<>(), options = new ArrayList<>(), teachers = new ArrayList<>(), classNames = new ArrayList<>();
+        final Map<String, CheckBox> absent = new LinkedHashMap<>(), late = new LinkedHashMap<>();
+        final Map<String, List<CheckBox>> opts = new LinkedHashMap<>();
+        final Map<String, EditText> others = new LinkedHashMap<>();
+
+        String teacherName() {
+            int p = teacher.getSelectedItemPosition();
+            return p <= 0 || p >= teachers.size() ? "" : teachers.get(p);
+        }
+
+        String className() {
+            int p = cls.getSelectedItemPosition();
+            return p <= 0 || p >= classNames.size() ? "" : classNames.get(p);
+        }
+
+        ReportForm collect() {
+            ReportForm f = new ReportForm();
+            f.book = book.getText().toString();
+            f.workbook = wb.getText().toString();
+            f.other = other.getText().toString();
+            f.homework = hw.getText().toString();
+            f.general = general.getText().toString();
+            for (String c : members) {
+                if (absent.get(c).isChecked()) f.absent.add(c);
+                else if (late.get(c).isChecked()) f.late.add(c);
+                ReportForm.Mark m = new ReportForm.Mark();
+                List<CheckBox> cbs = opts.get(c);
+                for (int i = 0; i < cbs.size(); i++) if (cbs.get(i).isChecked()) m.opts.add(options.get(i));
+                m.other = others.get(c).getText().toString();
+                if (!m.empty()) f.marks.put(c, m);
+            }
+            return f;
+        }
+    }
+
+    void reportForm(final int idx, String teacher0, String date0, String cls0, final ReportForm f0) {
+        final FormUi u = new FormUi();
+        final boolean editing = idx >= 0;
+        base(editing ? "ویرایش گزارش" : "گزارش روزانه جدید", editing ? () -> showReport(idx) : this::reportsPage);
+        if (st.classes.length() == 0) {
+            text("ابتدا از بخش «کلاس‌ها» یک کلاس بسازید و زبان‌آموزان را به آن اضافه کنید.", 15);
+            backBtn();
+            return;
+        }
+        // header: teacher, date, class
+        u.teachers.add("(بدون نام)");
+        u.teachers.addAll(st.teachers());
+        String tsel = !teacher0.isEmpty() ? teacher0 : st.lastTeacher();
+        if (!tsel.isEmpty() && !u.teachers.contains(tsel)) u.teachers.add(tsel);
+        text("معلم", 14);
+        u.teacher = new Spinner(this);
+        ArrayAdapter<String> ta = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, u.teachers);
+        ta.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        u.teacher.setAdapter(ta);
+        u.teacher.setSelection(Math.max(0, u.teachers.indexOf(tsel)));
+        root.addView(u.teacher);
+        u.date = edit("تاریخ (مثلاً 1405/07/13)", date0.isEmpty() ? JalaliDate.todayJalali() : date0, false);
+        root.addView(u.date);
+        u.classNames.add("(انتخاب کلاس)");
+        for (int i = 0; i < st.classes.length(); i++) u.classNames.add(st.classes.optJSONObject(i).optString("name"));
+        if (!cls0.isEmpty() && !u.classNames.contains(cls0)) u.classNames.add(cls0);
+        text("کلاس", 14);
+        u.cls = new Spinner(this);
+        ArrayAdapter<String> ca = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, u.classNames);
+        ca.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        u.cls.setAdapter(ca);
+        final int csel = Math.max(0, u.classNames.indexOf(cls0));
+        u.cls.setSelection(csel);
+        root.addView(u.cls);
+        u.members.addAll(membersOf(cls0));
+        // lesson
+        text("درس امروز", 18);
+        u.book = edit("Student's book (مثلاً صفحه 20، 21)", f0.book, false);
+        u.wb = edit("Workbook (مثلاً صفحه 15)", f0.workbook, false);
+        u.other = edit("سایر (مثلاً صفحات 21-24 کتاب داستان)", f0.other, false);
+        root.addView(u.book);
+        root.addView(u.wb);
+        root.addView(u.other);
+        // options = current list + saved remarks that are no longer in the list
+        u.options.addAll(st.options());
+        for (ReportForm.Mark m : f0.marks.values()) for (String o : m.opts) if (!u.options.contains(o)) u.options.add(o);
+        text("حضور و غیاب و وضعیت بچه‌ها", 18);
+        if (cls0.isEmpty()) text("کلاس را انتخاب کنید تا اسامی زبان‌آموزان بیاید.", 14);
+        else if (u.members.isEmpty()) text("این کلاس عضو ندارد.", 14);
+        for (final String code : u.members) addStudentCard(u, code, f0);
+        // homework + general
+        text("تکلیف جلسه بعد", 18);
+        u.hw = edit("تکلیف جلسه بعد", f0.homework, true);
+        root.addView(u.hw);
+        text("یادداشت کلی", 18);
+        u.general = edit("یادداشت کلی (اختیاری)", f0.general, true);
+        root.addView(u.general);
+        u.cls.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (position == csel) return;
+                ReportForm f = u.collect();
+                reportForm(idx, u.teacherName(), u.date.getText().toString(), u.className(), f);
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
+        btn("💾 ذخیره گزارش", x -> saveForm(idx, u, false));
+        btn("📨 ذخیره و ارسال در پیام‌رسان", x -> saveForm(idx, u, true));
+        btn("👁 پیش‌نمایش متن", x -> {
+            String cn = u.className();
+            ReportForm f = u.collect();
+            info("پیش‌نمایش", f.toText(u.teacherName(), u.date.getText().toString(), cn, u.members, this::displayName));
+        });
+        backBtn();
+    }
+
+    void addStudentCard(final FormUi u, final String code, ReportForm f0) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackgroundColor(Color.rgb(240, 242, 248));
+        card.setPadding(dp(10), dp(6), dp(10), dp(6));
+        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        cp.setMargins(0, dp(4), 0, dp(4));
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        TextView nm = new TextView(this);
+        nm.setText(displayName(code));
+        nm.setTextSize(17);
+        head.addView(nm, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        final CheckBox ab = new CheckBox(this), lt = new CheckBox(this);
+        ab.setText("غایب");
+        lt.setText("تأخیر");
+        ab.setChecked(f0.absent.contains(code));
+        lt.setChecked(f0.late.contains(code) && !f0.absent.contains(code));
+        head.addView(ab);
+        head.addView(lt);
+        card.addView(head);
+        final TextView toggle = new TextView(this);
+        toggle.setTextSize(15);
+        toggle.setTextColor(Color.rgb(30, 80, 160));
+        toggle.setPadding(dp(4), dp(8), dp(4), dp(8));
+        card.addView(toggle);
+        final LinearLayout det = new LinearLayout(this);
+        det.setOrientation(LinearLayout.VERTICAL);
+        final List<CheckBox> cbs = new ArrayList<>();
+        ReportForm.Mark mk = f0.marks.get(code);
+        for (String o : u.options) {
+            CheckBox c = new CheckBox(this);
+            c.setText(o);
+            c.setChecked(mk != null && mk.opts.contains(o));
+            cbs.add(c);
+            det.addView(c);
+        }
+        final EditText oth = edit("توضیح دیگر", mk == null ? "" : mk.other, false);
+        det.addView(oth);
+        card.addView(det);
+        det.setVisibility(mk != null && !mk.empty() && !ab.isChecked() ? View.VISIBLE : View.GONE);
+        u.absent.put(code, ab);
+        u.late.put(code, lt);
+        u.opts.put(code, cbs);
+        u.others.put(code, oth);
+        final Runnable refresh = () -> {
+            int n = 0;
+            for (CheckBox c : cbs) if (c.isChecked()) n++;
+            if (!oth.getText().toString().trim().isEmpty()) n++;
+            boolean open = det.getVisibility() == View.VISIBLE;
+            toggle.setText("وضعیت امروز" + (n > 0 ? " (" + n + " مورد)" : "") + (open ? " ▴" : " ▾"));
+            toggle.setVisibility(ab.isChecked() ? View.GONE : View.VISIBLE);
+            if (ab.isChecked()) det.setVisibility(View.GONE);
+        };
+        toggle.setOnClickListener(v -> {
+            det.setVisibility(det.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
+            refresh.run();
+        });
+        ab.setOnCheckedChangeListener((b, c) -> {
+            if (c) lt.setChecked(false);
+            refresh.run();
+        });
+        lt.setOnCheckedChangeListener((b, c) -> {
+            if (c) ab.setChecked(false);
+            refresh.run();
+        });
+        for (CheckBox c : cbs) c.setOnCheckedChangeListener((b, ch) -> refresh.run());
+        refresh.run();
+        root.addView(card, cp);
+    }
+
+    void saveForm(final int idx, final FormUi u, final boolean send) {
+        final String cn = u.className();
+        if (cn.isEmpty()) {
+            toast("کلاس را انتخاب کنید");
+            return;
+        }
+        String ds0 = u.date.getText().toString().trim();
+        final String ds = ds0.isEmpty() ? JalaliDate.todayJalali() : ds0;
+        final String tn = u.teacherName();
+        final ReportForm f = u.collect();
+        final String text = f.toText(tn, ds, cn, u.members, this::displayName);
+        final Runnable done = () -> {
+            if (!tn.isEmpty()) st.setLastTeacher(tn);
+            if (send) {
+                Intent i = new Intent(Intent.ACTION_SEND);
+                i.setType("text/plain");
+                i.putExtra(Intent.EXTRA_TEXT, text);
+                startActivity(Intent.createChooser(i, "ارسال گزارش"));
+            }
+            reportsPage();
+        };
+        try {
+            final JSONObject fj = f.toJson();
+            final int dup = idx < 0 ? Reports.findDuplicate(st.reports, ds, cn, tn, -1) : -1;
+            if (dup >= 0) {
+                confirm("گزارش تکراری", "برای همین تاریخ، کلاس و معلم قبلاً گزارشی ثبت شده است. جایگزین شود؟", "جایگزین", () -> {
+                    try {
+                        commitReport(dup, null, ds, cn, tn, text, fj);
+                    } catch (JSONException e) {
+                        toast("خطا در ذخیره");
+                        return;
+                    }
+                    done.run();
+                });
+                return;
+            }
+            commitReport(idx, new JSONObject(), ds, cn, tn, text, fj);
+        } catch (JSONException e) {
+            toast("خطا در ذخیره");
+            return;
+        }
+        done.run();
     }
 
     // =====================================================================
@@ -583,9 +938,14 @@ public class MainActivity extends Activity {
 
     void periodReport(final int days) {
         base(days == 7 ? "گزارش هفتگی" : "گزارش ماهانه", this::home);
-        btn("📌 گزارش کلی کلاس", x -> overallPeriod(days));
+        btn("📌 گزارش کلی کلاس", x -> {
+            fClass = "";
+            fTeacher = "";
+            overallPeriod(days);
+        });
         btn("👤 گزارش هر زبان‌آموز", x -> studentPeriod(days));
         btn("🔎 بررسی نام‌های مشابه", x -> ambiguousNames());
+        exportButtons((days == 7 ? "weekly" : "monthly") + "-all-students", () -> allStudentsText(days));
         backBtn();
     }
 
@@ -627,23 +987,176 @@ public class MainActivity extends Activity {
         });
     }
 
+    String periodTitle(int days) {
+        return days == 7 ? "گزارش هفتگی" : "گزارش ماهانه";
+    }
+
+    /** Reports of the period that match the class and teacher filters ("" = all). */
+    List<Integer> filtered(Period p, String cls, String teacher) {
+        List<Integer> out = new ArrayList<>();
+        for (int i : p.idx) {
+            JSONObject r = st.reports.optJSONObject(i);
+            if (!cls.isEmpty() && !Text.norm(r.optString("class")).equals(Text.norm(cls))) continue;
+            if (!teacher.isEmpty() && !Text.norm(r.optString("teacher")).equals(Text.norm(teacher))) continue;
+            out.add(i);
+        }
+        return out;
+    }
+
+    String filterLine(String cls, String teacher) {
+        return "کلاس: " + (cls.isEmpty() ? "همه" : cls) + " • معلم: " + (teacher.isEmpty() ? "همه" : teacher);
+    }
+
+    /** Absences and lateness of every member in the reports of the class (all classes when cls is empty). */
+    String attendanceText(Period p, String cls, String teacher) {
+        List<Integer> rs = filtered(p, cls, teacher);
+        Set<String> heads = heads();
+        StringBuilder s = new StringBuilder();
+        for (int ci = 0; ci < st.classes.length(); ci++) {
+            String cn = st.classes.optJSONObject(ci).optString("name");
+            if (!cls.isEmpty() && !Text.norm(cn).equals(Text.norm(cls))) continue;
+            List<String> members = membersOf(cn);
+            if (members.isEmpty()) continue;
+            List<Integer> mine = new ArrayList<>();
+            for (int i : rs) if (Text.norm(st.reports.optJSONObject(i).optString("class")).equals(Text.norm(cn))) mine.add(i);
+            s.append("📋 حضور و غیاب — کلاس ").append(cn).append(" (").append(mine.size()).append(" گزارش)\n");
+            if (mine.isEmpty()) {
+                s.append("گزارشی برای این کلاس در بازه نیست.\n\n");
+                continue;
+            }
+            for (String code : members) {
+                int si = -1;
+                for (int k = 0; k < st.students.length(); k++) if (st.students.optJSONObject(k).optString("code").equals(code)) si = k;
+                if (si < 0) continue;
+                String key = keyOf(si);
+                Pattern pat = token(key);
+                List<String> ab = new ArrayList<>(), lt = new ArrayList<>();
+                if (!key.isEmpty()) {
+                    for (int i : mine) {
+                        JSONObject r = st.reports.optJSONObject(i);
+                        Hit h = hit(r.optString("text"), key, pat, heads);
+                        if (h.absent) ab.add(r.optString("date"));
+                        else if (h.late) lt.add(r.optString("date"));
+                    }
+                }
+                JSONObject so = st.students.optJSONObject(si);
+                s.append("• ").append(so.optString("first")).append(" ").append(so.optString("last")).append(" — ");
+                if (ab.isEmpty() && lt.isEmpty()) {
+                    s.append("بدون غیبت و تأخیر\n");
+                } else {
+                    if (!ab.isEmpty()) s.append("غایب: ").append(ab.size()).append(" بار (").append(joinList(ab)).append(")");
+                    if (!ab.isEmpty() && !lt.isEmpty()) s.append(" • ");
+                    if (!lt.isEmpty()) s.append("تأخیر: ").append(lt.size()).append(" بار (").append(joinList(lt)).append(")");
+                    s.append("\n");
+                }
+            }
+            s.append("\n");
+        }
+        return s.toString();
+    }
+
+    String joinList(List<String> l) {
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < l.size(); i++) {
+            if (i > 0) b.append("، ");
+            b.append(l.get(i));
+        }
+        return b.toString();
+    }
+
+    String overallBody(int days, Period p, String cls, String teacher) {
+        List<Integer> rs = filtered(p, cls, teacher);
+        StringBuilder s = new StringBuilder();
+        s.append(attendanceText(p, cls, teacher));
+        if (rs.isEmpty()) return s.append("در این بازه (با این فیلتر) گزارش روزانه‌ای وجود ندارد.\n").toString();
+        for (int i : rs) {
+            JSONObject r = st.reports.optJSONObject(i);
+            s.append("• ").append(r.optString("date")).append(" | ").append(r.optString("class"));
+            if (!r.optString("teacher").isEmpty()) s.append(" | ").append(r.optString("teacher"));
+            s.append("\n").append(r.optString("text")).append("\n\n");
+        }
+        return s.toString();
+    }
+
+    String overallText(int days) {
+        Period p = period(days);
+        StringBuilder s = new StringBuilder(periodTitle(days) + " — گزارش کلی کلاس\n");
+        s.append(periodHeader(p, days)).append("\n").append(filterLine(fClass, fTeacher)).append("\n");
+        String note = st.note("overallNote" + days);
+        if (!note.trim().isEmpty()) s.append("\nتوضیحات: ").append(note.trim()).append("\n");
+        s.append("\n").append(overallBody(days, p, fClass, fTeacher));
+        return s.toString();
+    }
+
+    List<String> teachersInUse() {
+        List<String> t = new ArrayList<>(st.teachers());
+        for (int i = 0; i < st.reports.length(); i++) {
+            String v = st.reports.optJSONObject(i).optString("teacher").trim();
+            if (!v.isEmpty() && !t.contains(v)) t.add(v);
+        }
+        return t;
+    }
+
+    void filterButton(final int days, final boolean forClass) {
+        btn(forClass ? "🏫 کلاس: " + (fClass.isEmpty() ? "همه" : fClass) : "👩‍🏫 معلم: " + (fTeacher.isEmpty() ? "همه" : fTeacher), x -> {
+            final List<String> items = new ArrayList<>();
+            items.add("همه");
+            if (forClass) {
+                for (int i = 0; i < st.classes.length(); i++) items.add(st.classes.optJSONObject(i).optString("name"));
+            } else {
+                items.addAll(teachersInUse());
+            }
+            new AlertDialog.Builder(this).setTitle(forClass ? "انتخاب کلاس" : "انتخاب معلم")
+                    .setItems(items.toArray(new String[0]), (d, w) -> {
+                        if (forClass) fClass = w == 0 ? "" : items.get(w);
+                        else fTeacher = w == 0 ? "" : items.get(w);
+                        overallPeriod(days);
+                    }).show();
+        });
+    }
+
     void overallPeriod(final int days) {
         base("گزارش کلی", () -> periodReport(days));
         Period p = period(days);
         text(periodHeader(p, days), 14);
+        filterButton(days, true);
+        filterButton(days, false);
         noteEditor("overallNote" + days);
+        exportButtons("overall-" + (days == 7 ? "weekly" : "monthly"), () -> overallText(days));
         backBtn();
-        if (p.idx.isEmpty()) {
-            text("در این بازه گزارش روزانه‌ای وجود ندارد.", 15);
-            return;
+        text(overallBody(days, p, fClass, fTeacher), 15).setTextIsSelectable(true);
+    }
+
+    interface TextSource { String get(); }
+
+    /** Two buttons: save as a .txt file, or share the text (Telegram, WhatsApp, Eitaa, ...). */
+    void exportButtons(final String name, final TextSource src) {
+        btn("📤 ذخیره به‌صورت فایل (TXT)", x -> exportFile(name + "-" + new SimpleDateFormat("yyyyMMdd", Locale.US).format(new Date()) + ".txt", src.get()));
+        btn("📨 ارسال در پیام‌رسان", x -> {
+            Intent i = new Intent(Intent.ACTION_SEND);
+            i.setType("text/plain");
+            i.putExtra(Intent.EXTRA_TEXT, src.get());
+            startActivity(Intent.createChooser(i, "ارسال گزارش"));
+        });
+    }
+
+    void exportFile(String fileName, String content) {
+        pendingExport = content;
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("text/plain");
+        i.putExtra(Intent.EXTRA_TITLE, fileName);
+        startActivityForResult(i, PICK_EXPORT);
+    }
+
+    /** UTF-8 with BOM so Persian text opens correctly in Notepad and similar apps. */
+    void writeExport(Uri u) throws Exception {
+        try (OutputStream out = getContentResolver().openOutputStream(u, "wt")) {
+            if (out == null) throw new IOException("امکان نوشتن در فایل نیست");
+            out.write(new byte[]{(byte) 0xEF, (byte) 0xBB, (byte) 0xBF});
+            out.write(pendingExport.getBytes(StandardCharsets.UTF_8));
         }
-        StringBuilder s = new StringBuilder();
-        for (int i : p.idx) {
-            JSONObject r = st.reports.optJSONObject(i);
-            s.append("• ").append(r.optString("date")).append(" | ").append(r.optString("class")).append("\n")
-                    .append(r.optString("text")).append("\n\n");
-        }
-        text(s.toString(), 15).setTextIsSelectable(true);
+        toast("فایل گزارش ذخیره شد");
     }
 
     void studentPeriod(final int days) {
@@ -665,73 +1178,290 @@ public class MainActivity extends Activity {
      * name. Otherwise a report line is attributed to the student only when it contains the FULL name, so lines are never
      * attributed to the wrong person.
      */
-    void studentReport(int si, final int days) {
-        final JSONObject s = st.students.optJSONObject(si);
-        if (s == null) return;
-        String first = s.optString("first"), last = s.optString("last");
-        String nf = Text.norm(first), nfull = Text.norm(first + " " + last);
+
+    /** Number of other students whose first name equals (or starts with) this student's first name. */
+    int clashCount(int si, String nf) {
         int clash = 0;
         for (int k = 0; k < st.students.length(); k++) {
             if (k == si) continue;
             String o = Text.norm(st.students.optJSONObject(k).optString("first"));
             if (o.equals(nf) || o.startsWith(nf + " ")) clash++;
         }
-        final String key = clash == 0 ? nf : nfull;
-        final Pattern pat = token(key);
+        return clash;
+    }
+
+    /** Matching key: the first name when unique, otherwise the full name. */
+    String keyOf(int si) {
+        JSONObject s = st.students.optJSONObject(si);
+        String nf = Text.norm(s.optString("first"));
+        return clashCount(si, nf) == 0 ? nf : Text.norm(s.optString("first") + " " + s.optString("last"));
+    }
+
+    /** True when the report mentions (or marks absent) at least one student of the class; guards against "empty" reports. */
+    boolean mentionsAnyMember(String txt, String cls, Set<String> heads) {
+        for (int k = 0; k < st.students.length(); k++) {
+            if (!cls.equals(st.classNameOf(st.students.optJSONObject(k).optString("code")))) continue;
+            String key = keyOf(k);
+            if (key.isEmpty()) continue;
+            Hit h = hit(txt, key, token(key), heads);
+            if (h.absent || h.late || !h.text.trim().isEmpty()) return true;
+        }
+        return false;
+    }
+
+    boolean firstNameAppears(String txt, String nf) {
+        Pattern p = token(nf);
+        for (String line : txt.split("\\r?\\n")) if (p.matcher(Text.norm(line)).find()) return true;
+        return false;
+    }
+
+    /**
+     * A report of the student's own class that does not name him/her (and does name classmates) means: present and
+     * homework done well. Reports of other classes are ignored; reports without a class are "unknown".
+     */
+    /** Everything the student's report contains (used by both the screen and the exports). */
+    StudentOut computeStudent(int si, int days, Period p, Set<String> heads) {
+        StudentOut o = new StudentOut();
+        JSONObject s = st.students.optJSONObject(si);
+        if (s == null) return o;
+        String nf = Text.norm(s.optString("first"));
+        int clash = clashCount(si, nf);
+        String key = keyOf(si);
+        Pattern pat = token(key);
+        String cls = st.classNameOf(s.optString("code"));
+        String ncls = Text.norm(cls);
+        StringBuilder out = new StringBuilder();
+        int total = 0;
+        ArrayList<Summary.Entry> entries = new ArrayList<>();
+        if (!key.isEmpty()) {
+            for (int i : p.idx) {
+                JSONObject r = st.reports.optJSONObject(i);
+                String rtext = r.optString("text"), rcls = r.optString("class"), nrc = Text.norm(rcls);
+                if (!ncls.isEmpty() && !nrc.isEmpty() && !nrc.equals(ncls)) continue; // another class's report
+                total++;
+                String date = r.optString("date");
+                String hdr = "[ " + date + " | " + rcls + " ]\n";
+                Hit h = hit(rtext, key, pat, heads);
+                String lateNote = h.late ? "با تأخیر آمد\n" : "";
+                if (h.absent || !h.text.isEmpty()) {
+                    entries.add(new Summary.Entry(date, h.absent, h.late, h.body));
+                    o.found = true;
+                    out.append(hdr).append(h.absent ? "غایب بود\n" : "").append(lateNote).append(h.text).append("\n");
+                } else if (!ncls.isEmpty() && nrc.equals(ncls) && !(clash > 0 && firstNameAppears(rtext, nf))
+                        && (Reports.hasStatusHeader(rtext) || mentionsAnyMember(rtext, cls, heads))) {
+                    entries.add(Summary.Entry.implied(date, h.late));
+                    o.found = true;
+                    out.append(hdr).append(lateNote).append(Summary.IMPLIED).append("\n\n");
+                } else if (h.late) {
+                    entries.add(new Summary.Entry(date, false, true, ""));
+                    o.found = true;
+                    out.append(hdr).append(lateNote).append("\n");
+                }
+            }
+        }
+        if (!o.found) out.append("موردی برای این زبان‌آموز در گزارش‌های این بازه پیدا نشد.");
+        else o.summary = Summary.build(entries, total, key);
+        o.details = out.toString();
+        return o;
+    }
+
+    String studentText(int si, int days, Period p, Set<String> heads) {
+        JSONObject s = st.students.optJSONObject(si);
+        StudentOut o = computeStudent(si, days, p, heads);
+        StringBuilder t = new StringBuilder(periodTitle(days) + " — " + s.optString("first") + " " + s.optString("last") + "\n");
+        String cls = st.classNameOf(s.optString("code"));
+        if (!cls.isEmpty()) t.append("کلاس: ").append(cls).append("\n");
+        t.append(periodHeader(p, days)).append("\n");
+        String note = st.note("studentNote" + days + "_" + s.optString("code"));
+        if (!note.trim().isEmpty()) t.append("\nتوضیحات: ").append(note.trim()).append("\n");
+        t.append("\n");
+        if (!o.summary.isEmpty()) t.append(o.summary).append("\n\n");
+        return t.append(o.details).toString();
+    }
+
+    void studentReport(int si, final int days) {
+        final JSONObject s = st.students.optJSONObject(si);
+        if (s == null) return;
+        String first = s.optString("first"), last = s.optString("last");
+        int clash = clashCount(si, Text.norm(first));
+        final String cls = st.classNameOf(s.optString("code"));
+        final Set<String> heads = heads();
+        final int fsi = si;
 
         base("گزارش " + first + " " + last, () -> periodReport(days));
-        Period p = period(days);
+        final Period p = period(days);
         StringBuilder head = new StringBuilder(periodHeader(p, days));
         if (clash > 0) {
             head.append("\n⚠️ نام کوچک مشترک یا مشابه است؛ فقط مواردی نمایش داده می‌شود که نام و نام خانوادگی کامل در آن‌ها آمده باشد. ")
                     .append("از «بررسی نام‌های مشابه» برای جزئیات استفاده کنید.");
         }
+        if (cls.isEmpty()) head.append("\nℹ️ این زبان‌آموز در هیچ کلاسی نیست؛ «حاضر بدون ذکر نام» فقط برای اعضای کلاس محاسبه می‌شود.");
         text(head.toString(), 14);
         noteEditor("studentNote" + days + "_" + s.optString("code"));
+        exportButtons((days == 7 ? "weekly-" : "monthly-") + (first + "-" + last).replace(' ', '_'),
+                () -> studentText(fsi, days, p, heads));
         backBtn();
-        StringBuilder out = new StringBuilder();
-        boolean found = false;
-        if (!key.isEmpty()) {
-            for (int i : p.idx) {
-                JSONObject r = st.reports.optJSONObject(i);
-                String ex = extract(r.optString("text"), key, pat);
-                if (!ex.isEmpty()) {
-                    found = true;
-                    out.append("[ ").append(r.optString("date")).append(" | ").append(r.optString("class")).append(" ]\n").append(ex).append("\n");
-                }
-            }
+        StudentOut o = computeStudent(si, days, p, heads);
+        if (!o.summary.isEmpty()) text(o.summary, 15).setTextIsSelectable(true);
+        text(o.details, 16).setTextIsSelectable(true);
+    }
+
+    /** One file with the report of every student (class by class order of the student list). */
+    String allStudentsText(int days) {
+        Period p = period(days);
+        Set<String> heads = heads();
+        StringBuilder t = new StringBuilder(periodTitle(days) + " — همه زبان‌آموزان\n").append(periodHeader(p, days)).append("\n");
+        for (int i = 0; i < st.students.length(); i++) {
+            t.append("\n==============================\n").append(studentText(i, days, p, heads));
         }
-        if (!found) out.append("موردی برای این زبان‌آموز در گزارش‌های این بازه پیدا نشد.");
-        text(out.toString(), 16).setTextIsSelectable(true);
+        return t.toString();
     }
 
     Pattern token(String n) {
-        return Pattern.compile("(^|[^\\p{L}\\p{N}])" + Pattern.quote(n) + "([^\\p{L}\\p{N}]|$)");
+        return Reports.token(n);
     }
 
-    /** Heading blocks (a line that is exactly the name, followed by lines up to a blank line); else lines containing the name. */
+    /** Attendance line such as "غایب : آوین ، زهرا" (names separated by ، , ; or "و"). */
+    static final Pattern ABSENT_LINE = Pattern.compile("^(غایب|غیبت)\\S*\\s*[:：]");
+
+    /** Only list-style lines ("غایب : آوین ، زهرا") count; a remark like "غایب بود" under a student's name does not. */
+    boolean isAbsentLine(String n) {
+        return ABSENT_LINE.matcher(n).find();
+    }
+
+    /** Lateness line such as "تأخیر : آوین ، زهرا" (after normalization the hamza is gone). */
+    static final Pattern LATE_LINE = Pattern.compile("^(تاخیر|تاخیر|دیرکرد|دیر)\\S*\\s*[:：]");
+
+    boolean isLateLine(String n) {
+        return LATE_LINE.matcher(n).find();
+    }
+
+    boolean absentMatches(String n, String key) {
+        int i = n.indexOf(':');
+        String list = i >= 0 ? n.substring(i + 1) : n.replaceFirst("^\\S+", "");
+        for (String t : list.split("[,،;؛]|\\sو\\s")) {
+            t = t.trim();
+            if (!t.isEmpty() && (t.equals(key) || t.startsWith(key + " "))) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Heading blocks (a line that is exactly the name, followed by lines up to a blank line); else lines containing the
+     * name. Attendance lines ("غایب: ...") add "غایب بود" when the student is listed.
+     */
     String extract(String txt, String key, Pattern pat) {
+        Hit h = hit(txt, key, pat);
+        return (h.absent ? "غایب بود\n" : "") + h.text;
+    }
+
+    Hit hit(String txt, String key, Pattern pat) {
+        return hit(txt, key, pat, new HashSet<String>());
+    }
+
+    /** Normalized first names and full names of all students: used to know where another student's section starts. */
+    Set<String> heads() {
+        Set<String> h = new HashSet<>();
+        for (int i = 0; i < st.students.length(); i++) {
+            JSONObject o = st.students.optJSONObject(i);
+            h.add(Text.norm(o.optString("first")));
+            h.add(Text.norm(o.optString("first") + " " + o.optString("last")));
+        }
+        h.remove("");
+        return h;
+    }
+
+    /** The names on a heading line: "مانیا ، الیسا" gives two names (separators: ، , ; ؛ or "و"). */
+    List<String> headingNames(String n) {
+        List<String> out = new ArrayList<>();
+        for (String part : n.split("[,،;؛]|\\sو\\s")) {
+            String b = Text.bare(part);
+            if (!b.isEmpty()) out.add(b);
+        }
+        return out;
+    }
+
+    /** Heading for the student: all names short (<= 3 words) and at least one is the student (key or key + last name). */
+    boolean isHeadingFor(String n, String key) {
+        if (n.isEmpty() || key.isEmpty()) return false;
+        List<String> names = headingNames(n);
+        if (names.isEmpty() || names.size() > 8) return false;
+        int keyWords = key.split(" ").length;
+        boolean mine = false;
+        for (String p : names) {
+            int words = p.split(" ").length;
+            if (words > 3) return false;
+            if (p.equals(key) || (p.startsWith(key + " ") && words - keyWords <= 2)) mine = true;
+        }
+        return mine;
+    }
+
+    /** True when every name on the line is a known student (the start of another student's section). */
+    boolean isNameLine(String n, Set<String> heads) {
+        List<String> names = headingNames(n);
+        if (names.isEmpty()) return false;
+        for (String p : names) {
+            boolean known = heads.contains(p);
+            for (String h : heads) {
+                if (!known && p.startsWith(h + " ")) known = true;
+            }
+            if (!known) return false;
+        }
+        return true;
+    }
+
+    /**
+     * A heading is a line of names (one or several separated by ،); the remark below applies to every name on it. The
+     * section runs until a blank line (one blank line right after the heading is tolerated) or the next student's
+     * heading. Without a heading, lines containing the name are used.
+     */
+    Hit hit(String txt, String key, Pattern pat, Set<String> heads) {
         String[] lines = txt.split("\\r?\\n");
-        StringBuilder blocks = new StringBuilder();
-        boolean on = false;
+        StringBuilder blocks = new StringBuilder(), body = new StringBuilder();
+        boolean on = false, absent = false, late = false, skippedBlank = false;
+        int got = 0;
         for (String line : lines) {
             String n = Text.norm(line);
+            if (isAbsentLine(n)) {
+                if (absentMatches(n, key)) absent = true;
+                on = false;
+                continue;
+            }
+            if (isLateLine(n)) {
+                if (absentMatches(n, key)) late = true;
+                on = false;
+                continue;
+            }
             if (on) {
-                if (n.isEmpty()) on = false;
-                else {
+                if (n.isEmpty()) {
+                    if (got == 0 && !skippedBlank) {
+                        skippedBlank = true;
+                        continue;
+                    }
+                    on = false;
+                } else if (!isHeadingFor(n, key) && isNameLine(n, heads)) {
+                    on = false;
+                } else {
                     blocks.append(line).append("\n");
+                    body.append(line).append("\n");
+                    got++;
                     continue;
                 }
             }
-            if (n.equals(key)) {
+            if (!n.isEmpty() && isHeadingFor(n, key)) {
                 on = true;
+                got = 0;
+                skippedBlank = false;
                 blocks.append(line).append("\n");
             }
         }
-        if (blocks.length() > 0) return blocks.toString();
+        if (blocks.length() > 0) return new Hit(absent, late, blocks.toString(), body.toString());
         StringBuilder out = new StringBuilder();
-        for (String line : lines) if (pat.matcher(Text.norm(line)).find()) out.append(line).append("\n");
-        return out.toString();
+        for (String line : lines) {
+            String n = Text.norm(line);
+            if (!isAbsentLine(n) && !isLateLine(n) && pat.matcher(n).find()) out.append(line).append("\n");
+        }
+        return new Hit(absent, late, out.toString(), out.toString());
     }
 
     void ambiguousNames() {
@@ -780,10 +1510,41 @@ public class MainActivity extends Activity {
 
     void settings() {
         base("تنظیمات", this::home);
+        btn("👩‍🏫 معلم‌ها", x -> listEditor("معلم‌ها", "نام هر معلم در یک خط", st.teachers(), 0));
+        btn("☑️ توضیحات آماده وضعیت بچه‌ها (تا ۸ مورد)", x -> listEditor("توضیحات آماده", "هر توضیح در یک خط (حداکثر ۸ مورد)", st.options(), Store.MAX_OPTIONS));
         btn("💾 پشتیبان‌گیری از داده‌ها", x -> backup());
-        btn("♻️ بازیابی داده‌ها", x -> pick(PICK_BACKUP));
-        btn("ℹ️ درباره برنامه", x -> info("کلاس 1.5", "عامل سبک مدیریت آموزشگاه زبان\nAndroid اول، iOS در مرحله بعد\nداده‌ها روی خود گوشی نگهداری می‌شوند."));
+        btn("♻️ بازیابی / ادغام پشتیبان", x -> pick(PICK_BACKUP));
+        btn("ℹ️ درباره برنامه", x -> info("کلاس 1.8", "عامل سبک مدیریت آموزشگاه زبان\nAndroid اول، iOS در مرحله بعد\nداده‌ها روی خود گوشی نگهداری می‌شوند."));
         backBtn();
+    }
+
+    /** One item per line; max == 0 means unlimited. Teachers and remark options share this editor. */
+    void listEditor(final String title, String hint, List<String> cur, final int max) {
+        final EditText e = edit(hint, joinLines(cur), true);
+        e.setMinLines(8);
+        LinearLayout l = form();
+        l.addView(e);
+        formDialog(title, l, () -> {
+            List<String> out = new ArrayList<>();
+            for (String line : e.getText().toString().split("\\r?\\n")) {
+                String t = line.trim();
+                if (!t.isEmpty() && !out.contains(t)) out.add(t);
+            }
+            if (max > 0 && out.size() > max) {
+                toast("حداکثر " + max + " مورد مجاز است");
+                return false;
+            }
+            if (max > 0) st.setOptions(out);
+            else st.setTeachers(out);
+            toast("ذخیره شد");
+            return true;
+        });
+    }
+
+    String joinLines(List<String> l) {
+        StringBuilder b = new StringBuilder();
+        for (String v : l) b.append(v).append("\n");
+        return b.toString().trim();
     }
 
     void backup() {
@@ -817,11 +1578,24 @@ public class MainActivity extends Activity {
             toast(err);
             return;
         }
-        confirm("بازیابی اطلاعات", "اطلاعات فعلی با نسخه پشتیبان جایگزین می‌شود. ادامه؟", "بازیابی", () -> {
-            st.replaceWith(r);
-            toast("بازیابی با موفقیت انجام شد");
-            home();
-        });
+        new AlertDialog.Builder(this).setTitle("بازیابی اطلاعات")
+                .setMessage("ادغام: اطلاعات فایل به داده‌های فعلی اضافه می‌شود و چیزی حذف یا عوض نمی‌شود (مناسب جمع‌بندی گزارش معلم‌ها).\n\n"
+                        + "جایگزینی: اطلاعات فعلی کاملاً با فایل عوض می‌شود.")
+                .setPositiveButton("ادغام", (d, w) -> {
+                    try {
+                        Merge.Result m = Merge.into(st, r);
+                        home();
+                        info("نتیجه ادغام", m.summary());
+                    } catch (JSONException e) {
+                        toast("خطا در ادغام");
+                    }
+                })
+                .setNeutralButton("جایگزینی", (d, w) -> confirm("جایگزینی کامل", "اطلاعات فعلی حذف و با فایل عوض می‌شود. ادامه؟", "جایگزین", () -> {
+                    st.replaceWith(r);
+                    toast("بازیابی با موفقیت انجام شد");
+                    home();
+                }))
+                .setNegativeButton("لغو", null).show();
     }
 
     // =====================================================================
@@ -837,6 +1611,7 @@ public class MainActivity extends Activity {
             switch (req) {
                 case PICK_BACKUP: restoreBackup(u); break;
                 case PICK_SAVE_BACKUP: writeBackup(u); break;
+                case PICK_EXPORT: writeExport(u); break;
                 case PICK_REPORT: importReportTxt(u); break;
                 case PICK_STUDENTS: importStudents(u); break;
                 case PICK_CLASSES: importClasses(u); break;
@@ -873,11 +1648,7 @@ public class MainActivity extends Activity {
     }
 
     void importReportTxt(Uri u) throws Exception {
-        String txt = readText(u);
-        JSONObject draft = new JSONObject();
-        String d = JalaliDate.findDate(txt);
-        draft.put("date", d != null ? d : JalaliDate.todayJalali()).put("class", "").put("text", txt);
-        reportDialog(-1, draft);
+        importReportText(readText(u));
     }
 
     String get(List<String> r, int i) {

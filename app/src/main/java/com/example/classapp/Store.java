@@ -7,17 +7,25 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 /** All app data (students, classes, reports, manual notes), persisted as JSON in SharedPreferences. */
 final class Store {
-    static final int VERSION = 5;
+    static final int VERSION = 6;
+    static final int MAX_OPTIONS = 8;
+    static final String[] DEFAULT_TEACHERS = {"Asal", "Asha"};
+    static final String[] DEFAULT_OPTIONS = {
+            "روخوانی تکرار گرفتند", "معنی تکرار گرفتند", "روخوانی با ارفاق پذیرفته شد",
+            "معنی با ارفاق پذیرفته شد", "تمرینات انجام نداده بودند", "تمرینات ناقص انجام شده بود"};
 
     private final SharedPreferences sp;
     JSONArray students, classes, reports;
-    JSONObject notes;
+    JSONObject notes, settings;
 
     Store(Context c) {
         sp = c.getSharedPreferences("class_data", 0);
@@ -25,6 +33,7 @@ final class Store {
         classes = clean(arr("classes"));
         reports = clean(arr("reports"));
         notes = obj("notes");
+        settings = obj("settings");
         normalize();
         migrateOldNotes();
     }
@@ -33,7 +42,7 @@ final class Store {
 
     void save() {
         sp.edit().putString("students", students.toString()).putString("classes", classes.toString())
-                .putString("reports", reports.toString()).putString("notes", notes.toString()).apply();
+                .putString("reports", reports.toString()).putString("notes", notes.toString()).putString("settings", settings.toString()).apply();
     }
 
     private JSONArray arr(String k) {
@@ -113,6 +122,64 @@ final class Store {
             ed.apply();
             save();
         }
+    }
+
+    // ---------- settings (teachers, remark options) ----------
+
+    private static List<String> strings(JSONArray a) {
+        List<String> out = new ArrayList<>();
+        if (a == null) return out;
+        for (int i = 0; i < a.length(); i++) {
+            String v = a.optString(i, "").trim();
+            if (!v.isEmpty() && !out.contains(v)) out.add(v);
+        }
+        return out;
+    }
+
+    List<String> teachers() {
+        if (!settings.has("teachers")) return new ArrayList<>(Arrays.asList(DEFAULT_TEACHERS));
+        return strings(settings.optJSONArray("teachers"));
+    }
+
+    List<String> options() {
+        if (!settings.has("options")) return new ArrayList<>(Arrays.asList(DEFAULT_OPTIONS));
+        List<String> l = strings(settings.optJSONArray("options"));
+        return l.size() > MAX_OPTIONS ? new ArrayList<>(l.subList(0, MAX_OPTIONS)) : l;
+    }
+
+    String lastTeacher() {
+        return settings.optString("lastTeacher", "");
+    }
+
+    private void putList(String key, List<String> v) {
+        try {
+            JSONArray a = new JSONArray();
+            for (String s : v) a.put(s);
+            settings.put(key, a);
+        } catch (JSONException ignored) {
+            // skip
+        }
+    }
+
+    void setTeachers(List<String> v) {
+        putList("teachers", strings(new JSONArray(v)));
+        save();
+    }
+
+    void setOptions(List<String> v) {
+        List<String> l = strings(new JSONArray(v));
+        if (l.size() > MAX_OPTIONS) l = new ArrayList<>(l.subList(0, MAX_OPTIONS));
+        putList("options", l);
+        save();
+    }
+
+    void setLastTeacher(String t) {
+        try {
+            settings.put("lastTeacher", t == null ? "" : t);
+        } catch (JSONException ignored) {
+            // skip
+        }
+        save();
     }
 
     // ---------- notes ----------
@@ -231,7 +298,7 @@ final class Store {
         return new JSONObject().put("app", "class").put("version", VERSION)
                 .put("exportedAt", System.currentTimeMillis())
                 .put("students", students).put("classes", classes).put("reports", reports)
-                .put("notes", notes).toString(2);
+                .put("notes", notes).put("settings", settings).toString(2);
     }
 
     /** Returns an error message, or null when the backup structure is valid. Older backups (without notes) are valid. */
@@ -249,6 +316,8 @@ final class Store {
         reports = clean(r.optJSONArray("reports"));
         JSONObject n = r.optJSONObject("notes");
         notes = n != null ? n : new JSONObject();
+        JSONObject sj = r.optJSONObject("settings"); // older backups have none: keep the current settings
+        if (sj != null) settings = sj;
         normalize();
         save();
     }
