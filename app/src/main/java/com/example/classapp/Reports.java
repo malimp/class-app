@@ -14,6 +14,11 @@ final class Reports {
     private static final Pattern LABELED = Pattern.compile("^\\S+\\s*[:：]\\s*(.+)$");
     private static final Pattern RESERVED = Pattern.compile("^(وضعیت|غایب|غیبت|تاخیر|کلاس|درس|تکلیف|یادداشت|با سلام|سلام|student|workbook)");
 
+    /** Keeps only letters, digits and single spaces (input is already normalized). */
+    static String bare(String n) {
+        return n.replaceAll("[^\\p{L}\\p{N}\\s]+", " ").replaceAll("\\s+", " ").trim();
+    }
+
     static Pattern token(String n) {
         return Pattern.compile("(^|[^\\p{L}\\p{N}])" + Pattern.quote(n) + "([^\\p{L}\\p{N}]|$)");
     }
@@ -93,7 +98,7 @@ final class Reports {
     /** True when the text has the daily-report status heading «وضعیت امروز بچه‌ها» (or "وضعیت بچه‌ها"). */
     static boolean hasStatusHeader(String txt) {
         for (String line : txt.split("\\r?\\n")) {
-            String b = Text.bare(Text.norm(line));
+            String b = bare(Text.norm(line));
             if (b.equals("وضعیت امروز بچه ها") || b.equals("وضعیت بچه ها") || b.equals("وضعیت امروز بچه‌ها")) return true;
         }
         return false;

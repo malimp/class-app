@@ -1375,7 +1375,7 @@ public class MainActivity extends Activity {
     List<String> headingNames(String n) {
         List<String> out = new ArrayList<>();
         for (String part : n.split("[,،;؛]|\\sو\\s")) {
-            String b = Text.bare(part);
+            String b = Reports.bare(part);
             if (!b.isEmpty()) out.add(b);
         }
         return out;
