@@ -21,15 +21,102 @@ final class Reports {
 
     static final String SCHOOL = "Moradi English Class";
 
-    /** Every report starts with the school name; texts that already start with it are left as they are. */
+    /** Removes the teacher line («معلم : نام», or the old «نام:» first line) so the teacher is not sent with the report. */
+    static String stripTeacher(String text) {
+        StringBuilder out = new StringBuilder();
+        int seen = 0;
+        boolean kept = false;
+        for (String line : text.split("\\r?\\n", -1)) {
+            String t = line.trim(), n = Text.norm(t);
+            boolean drop = false;
+            if (!t.isEmpty()) {
+                seen++;
+                if (n.startsWith("معلم")) drop = LABELED.matcher(t).find();
+                else if (seen <= 3 && !RESERVED.matcher(n).find() && TEACHER_COLON.matcher(t).find()) drop = true;
+            }
+            if (!drop) {
+                if (out.length() > 0 || kept) out.append('\n');
+                out.append(line);
+                kept = true;
+            }
+        }
+        return out.toString();
+    }
+
+    // The teacher travels inside the text as invisible characters (not shown in any messenger):
+    // U+2063, then the UTF-8 bits of the name (0 = U+200B, 1 = U+2060), then U+2063.
+    private static final Pattern HIDDEN = Pattern.compile("\u2063([\u200B\u2060]+)\u2063");
+
+    static String hiddenTeacher(String text) {
+        Matcher m = HIDDEN.matcher(text);
+        if (!m.find()) return "";
+        String bits = m.group(1);
+        if (bits.length() % 8 != 0) return "";
+        byte[] b = new byte[bits.length() / 8];
+        for (int i = 0; i < bits.length(); i++) {
+            if (bits.charAt(i) == '\u2060') b[i / 8] |= (byte) (1 << (7 - i % 8));
+        }
+        return new String(b, java.nio.charset.StandardCharsets.UTF_8).trim();
+    }
+
+    static String hide(String name) {
+        StringBuilder s = new StringBuilder("\u2063");
+        for (byte x : name.trim().getBytes(java.nio.charset.StandardCharsets.UTF_8)) {
+            for (int i = 7; i >= 0; i--) s.append(((x >> i) & 1) == 1 ? '\u2060' : '\u200B');
+        }
+        return s.append('\u2063').toString();
+    }
+
+    /** What is sent or exported as text: school name first, teacher only as the invisible marker. */
     static String withSchool(String text) {
-        String t = text == null ? "" : text;
+        return build(text, true);
+    }
+
+    /** The same without the invisible marker (pictures, previews). */
+    static String plain(String text) {
+        return build(text, false);
+    }
+
+    private static String build(String text, boolean hideTeacher) {
+        String raw = text == null ? "" : text;
+        String teacher = parseTeacher(raw);
+        String t = HIDDEN.matcher(stripTeacher(raw)).replaceAll("");
+        boolean has = false;
         for (String line : t.split("\\r?\\n")) {
             if (line.trim().isEmpty()) continue;
-            if (Text.norm(line).equals(Text.norm(SCHOOL))) return t;
+            has = Text.norm(line).equals(Text.norm(SCHOOL));
             break;
         }
-        return SCHOOL + "\n" + t;
+        if (!has) t = SCHOOL + "\n" + t;
+        if (hideTeacher && !teacher.isEmpty()) {
+            String[] lines = t.split("\\n", -1);
+            for (int i = 0; i < lines.length; i++) {
+                if (!lines[i].trim().isEmpty()) {
+                    lines[i] = lines[i] + hide(teacher);
+                    break;
+                }
+            }
+            StringBuilder b = new StringBuilder();
+            for (int i = 0; i < lines.length; i++) b.append(i > 0 ? "\n" : "").append(lines[i]);
+            t = b.toString();
+        }
+        return t;
+    }
+
+    /** One short line for lists: the report without its header lines. */
+    static String preview(String text) {
+        StringBuilder b = new StringBuilder();
+        for (String line : plain(text).split("\\r?\\n")) {
+            String t = line.trim(), n = Text.norm(t);
+            if (t.isEmpty() || n.equals(Text.norm(SCHOOL)) || n.startsWith("سلام") || n.startsWith("با سلام")
+                    || n.startsWith("کلاس") || n.startsWith("وضعیت") || n.startsWith("درس") || n.startsWith("تکلیف")
+                    || n.startsWith("student") || n.startsWith("workbook") || JalaliDate.findDate(t) != null) continue;
+            if (b.length() > 0) b.append(" ⏎ ");
+            b.append(t);
+            if (b.length() > 70) break;
+        }
+        String r = b.toString();
+        return r.length() > 70 ? r.substring(0, 70) + "…" : r;
     }
 
     static Pattern token(String n) {
@@ -38,6 +125,8 @@ final class Reports {
 
     /** "Asal:" or "معلم : Asal" within the first three non-empty lines; "" when absent. */
     static String parseTeacher(String txt) {
+        String h = hiddenTeacher(txt);
+        if (!h.isEmpty()) return h;
         int seen = 0;
         for (String line : txt.split("\\r?\\n")) {
             String t = line.trim();

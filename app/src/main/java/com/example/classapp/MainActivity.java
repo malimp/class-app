@@ -184,6 +184,29 @@ public class MainActivity extends Activity {
         return t;
     }
 
+    /** A list row with a small preview line under the title. */
+    void row2(String s, String sub, View.OnClickListener l) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(12), dp(10), dp(12), dp(10));
+        box.setBackgroundColor(Color.rgb(240, 242, 248));
+        box.setOnClickListener(l);
+        TextView t = new TextView(this);
+        t.setText(s);
+        t.setTextSize(16);
+        box.addView(t);
+        if (!sub.isEmpty()) {
+            TextView p = new TextView(this);
+            p.setText(sub);
+            p.setTextSize(13);
+            p.setTextColor(Color.rgb(100, 108, 130));
+            box.addView(p);
+        }
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, dp(3), 0, dp(3));
+        root.addView(box, lp);
+    }
+
     void row(String s, View.OnClickListener l) {
         TextView t = new TextView(this);
         t.setText(s);
@@ -536,7 +559,7 @@ public class MainActivity extends Activity {
         for (final int i : order) {
             JSONObject o = st.reports.optJSONObject(i);
             String cls = o.optString("class"), t = o.optString("teacher");
-            row(o.optString("date") + (cls.isEmpty() ? "" : " — " + cls) + (t.isEmpty() ? "" : " — " + t), x -> showReport(i));
+            row2(o.optString("date") + (cls.isEmpty() ? "" : " — " + cls) + (t.isEmpty() ? "" : " — " + t), Reports.preview(o.optString("text")), x -> showReport(i));
         }
     }
 
@@ -545,7 +568,7 @@ public class MainActivity extends Activity {
         if (o == null) return;
         base(o.optString("date") + (o.optString("class").isEmpty() ? "" : " — " + o.optString("class")), this::reportsPage);
         btn("✏️ ویرایش", x -> editReport(i));
-        exportButtons("report-" + o.optString("date").replace('/', '-'), () -> o.optString("text"));
+        exportButtons("report-" + o.optString("date").replace('/', '-'), () -> o.optString("text"), true);
         imageButtons("report-" + o.optString("date").replace('/', '-'), () -> o.optString("text"));
         btn("🗑️ حذف گزارش", x -> confirm("حذف گزارش", "این گزارش حذف شود؟", "حذف", () -> {
             st.reports.remove(i);
@@ -813,7 +836,7 @@ public class MainActivity extends Activity {
         btn("👁 پیش‌نمایش متن", x -> {
             String cn = u.className();
             ReportForm f = u.collect();
-            info("پیش‌نمایش", f.toText(u.teacherName(), u.date.getText().toString(), cn, u.members, this::displayName));
+            info("پیش‌نمایش", Reports.plain(f.toText(u.teacherName(), u.date.getText().toString(), cn, u.members, this::displayName)));
         });
         backBtn();
     }
@@ -907,7 +930,7 @@ public class MainActivity extends Activity {
             else if (send == 1) {
                 Intent i = new Intent(Intent.ACTION_SEND);
                 i.setType("text/plain");
-                i.putExtra(Intent.EXTRA_TEXT, text);
+                i.putExtra(Intent.EXTRA_TEXT, Reports.withSchool(text));
                 startActivity(Intent.createChooser(i, "ارسال گزارش"));
             }
             reportsPage();
@@ -1067,7 +1090,7 @@ public class MainActivity extends Activity {
         return b.toString();
     }
 
-    String overallBody(int days, Period p, String cls, String teacher) {
+    String overallBody(int days, Period p, String cls, String teacher, boolean showTeacher) {
         List<Integer> rs = filtered(p, cls, teacher);
         StringBuilder s = new StringBuilder();
         s.append(attendanceText(p, cls, teacher));
@@ -1075,7 +1098,7 @@ public class MainActivity extends Activity {
         for (int i : rs) {
             JSONObject r = st.reports.optJSONObject(i);
             s.append("• ").append(r.optString("date")).append(" | ").append(r.optString("class"));
-            if (!r.optString("teacher").isEmpty()) s.append(" | ").append(r.optString("teacher"));
+            if (showTeacher && !r.optString("teacher").isEmpty()) s.append(" | ").append(r.optString("teacher"));
             s.append("\n").append(r.optString("text")).append("\n\n");
         }
         return s.toString();
@@ -1084,10 +1107,10 @@ public class MainActivity extends Activity {
     String overallText(int days) {
         Period p = period(days);
         StringBuilder s = new StringBuilder(periodTitle(days) + " — گزارش کلی کلاس\n");
-        s.append(periodHeader(p, days)).append("\n").append(filterLine(fClass, fTeacher)).append("\n");
+        s.append(periodHeader(p, days)).append("\n").append("کلاس: ").append(fClass.isEmpty() ? "همه" : fClass).append("\n");
         String note = st.note("overallNote" + days);
         if (!note.trim().isEmpty()) s.append("\nتوضیحات: ").append(note.trim()).append("\n");
-        s.append("\n").append(overallBody(days, p, fClass, fTeacher));
+        s.append("\n").append(overallBody(days, p, fClass, fTeacher, false));
         return s.toString();
     }
 
@@ -1127,18 +1150,23 @@ public class MainActivity extends Activity {
         noteEditor("overallNote" + days);
         exportButtons("overall-" + (days == 7 ? "weekly" : "monthly"), () -> overallText(days));
         backBtn();
-        text(overallBody(days, p, fClass, fTeacher), 15).setTextIsSelectable(true);
+        text(overallBody(days, p, fClass, fTeacher, true), 15).setTextIsSelectable(true);
     }
 
     interface TextSource { String get(); }
 
     /** Two buttons: save as a .txt file, or share the text (Telegram, WhatsApp, Eitaa, ...). */
     void exportButtons(final String name, final TextSource src) {
-        btn("📤 ذخیره به‌صورت فایل (TXT)", x -> exportFile(name + "-" + new SimpleDateFormat("yyyyMMdd", Locale.US).format(new Date()) + ".txt", Reports.withSchool(src.get())));
+        exportButtons(name, src, false);
+    }
+
+    /** hideTeacher: daily reports carry the teacher as an invisible marker; period reports never do. */
+    void exportButtons(final String name, final TextSource src, final boolean hideTeacher) {
+        btn("📤 ذخیره به‌صورت فایل (TXT)", x -> exportFile(name + "-" + new SimpleDateFormat("yyyyMMdd", Locale.US).format(new Date()) + ".txt", (hideTeacher ? Reports.withSchool(src.get()) : Reports.plain(src.get()))));
         btn("📨 ارسال در پیام‌رسان", x -> {
             Intent i = new Intent(Intent.ACTION_SEND);
             i.setType("text/plain");
-            i.putExtra(Intent.EXTRA_TEXT, Reports.withSchool(src.get()));
+            i.putExtra(Intent.EXTRA_TEXT, hideTeacher ? Reports.withSchool(src.get()) : Reports.plain(src.get()));
             startActivity(Intent.createChooser(i, "ارسال گزارش"));
         });
     }
@@ -1155,7 +1183,7 @@ public class MainActivity extends Activity {
     /** The report as a picture with the faint logo; null (after a message) when it cannot be drawn. */
     byte[] reportPng(String text) {
         try {
-            Bitmap b = ReportImage.render(this, Reports.withSchool(text));
+            Bitmap b = ReportImage.render(this, Reports.plain(text));
             if (b == null) {
                 toast("گزارش برای یک تصویر بیش از حد طولانی است؛ از ارسال متنی استفاده کنید");
                 return null;
@@ -1362,8 +1390,9 @@ public class MainActivity extends Activity {
         if (cls.isEmpty()) head.append("\nℹ️ این زبان‌آموز در هیچ کلاسی نیست؛ «حاضر بدون ذکر نام» فقط برای اعضای کلاس محاسبه می‌شود.");
         text(head.toString(), 14);
         noteEditor("studentNote" + days + "_" + s.optString("code"));
-        exportButtons((days == 7 ? "weekly-" : "monthly-") + (first + "-" + last).replace(' ', '_'),
-                () -> studentText(fsi, days, p, heads));
+        final String fname = (days == 7 ? "weekly-" : "monthly-") + (first + "-" + last).replace(' ', '_');
+        exportButtons(fname, () -> studentText(fsi, days, p, heads));
+        imageButtons(fname, () -> studentText(fsi, days, p, heads));
         backBtn();
         StudentOut o = computeStudent(si, days, p, heads);
         text(o.details, 16).setTextIsSelectable(true);
