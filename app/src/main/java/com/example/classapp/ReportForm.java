@@ -58,8 +58,8 @@ final class ReportForm {
      */
     String toText(String teacher, String date, String cls, List<String> members, Names n) {
         normalize();
-        StringBuilder s = new StringBuilder();
-        if (!teacher.trim().isEmpty()) s.append(teacher.trim()).append(":\n");
+        StringBuilder s = new StringBuilder(Reports.SCHOOL).append("\n");
+        if (!teacher.trim().isEmpty()) s.append("معلم : ").append(oneLine(teacher)).append("\n");
         s.append("با سلام\n\n").append(date.trim()).append("\n");
         if (!cls.trim().isEmpty()) s.append("کلاس : ").append(cls.trim()).append("\n");
         s.append("\n");

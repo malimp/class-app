@@ -13,19 +13,27 @@ final class Text {
     /** Normalizes text for comparison only (never for display). */
     static String norm(String s) {
         if (s == null) return "";
+        s = s.replace("\u0627\u0653", "\u0622");                        // ا + madda -> آ
         StringBuilder b = new StringBuilder(s.length());
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
             if (c == '\u064A' || c == '\u0649') c = '\u06CC';          // ي ى -> ی
+            else if (c == '\u0623' || c == '\u0625' || c == '\u0671') c = '\u0627'; // أ إ ٱ -> ا
+            else if (c == '\u0629' || c == '\u06C0') c = '\u0647';      // ة ۀ -> ه
             else if (c == '\u0643') c = '\u06A9';                      // ك -> ک
             else if (c >= '\u06F0' && c <= '\u06F9') c = (char) ('0' + (c - '\u06F0'));
             else if (c >= '\u0660' && c <= '\u0669') c = (char) ('0' + (c - '\u0660'));
             else if (c == '\u200C' || c == '\u00A0') c = ' ';          // ZWNJ / NBSP -> space
             else if (c == '\u200D' || c == '\u200E' || c == '\u200F' || c == '\u0640'
-                    || c == '\u0670' || c == '\uFEFF' || (c >= '\u064B' && c <= '\u0652')) continue;
+                    || c == '\u0670' || c == '\uFEFF' || (c >= '\u064B' && c <= '\u0655')) continue;
             b.append(c);
         }
         return b.toString().trim().replaceAll("\\s+", " ").toLowerCase(Locale.ROOT);
+    }
+
+    /** Strips everything except letters, digits and single spaces (colons, dashes, bullets, emojis...). Use on norm() output. */
+    static String bare(String n) {
+        return n.replaceAll("[^\\p{L}\\p{N}\\s]+", " ").replaceAll("\\s+", " ").trim();
     }
 
     /** Converts Persian/Arabic digits to ASCII digits and trims; other characters are untouched. */

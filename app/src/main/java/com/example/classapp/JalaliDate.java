@@ -10,6 +10,8 @@ import java.util.regex.Pattern;
 final class JalaliDate {
     static final long INVALID = Long.MIN_VALUE;
     private static final Pattern DATE = Pattern.compile("(\\d{4})[/\\-.](\\d{1,2})[/\\-.](\\d{1,2})");
+    /** Month/day without a year, e.g. "7/12" (reports often omit the year). */
+    private static final Pattern MD = Pattern.compile("(?<![\\d/\\-.])(\\d{1,2})[/\\-.](\\d{1,2})(?![\\d/\\-.])");
 
     private JalaliDate() {}
 
@@ -107,7 +109,12 @@ final class JalaliDate {
                 int y = Integer.parseInt(m.group(1)), mo = Integer.parseInt(m.group(2)), d = Integer.parseInt(m.group(3));
                 if (valid(y, mo, d)) return fmt(y, mo, d);
             }
-            if (++seen >= 3) break;
+            Matcher m2 = MD.matcher(Text.norm(line));
+            if (m2.find()) {
+                int[] j = inferMd(Integer.parseInt(m2.group(1)), Integer.parseInt(m2.group(2)));
+                if (j != null) return fmt(j[0], j[1], j[2]);
+            }
+            if (++seen >= 6) break;
         }
         return null;
     }
@@ -127,12 +134,28 @@ final class JalaliDate {
     /** Returns {gy, gm, gd} of the first valid date in text, or null. */
     private static int[] find(String text) {
         if (text == null) return null;
-        Matcher m = DATE.matcher(Text.norm(text));
+        String s = Text.norm(text);
+        Matcher m = DATE.matcher(s);
         while (m.find()) {
             int y = Integer.parseInt(m.group(1)), mo = Integer.parseInt(m.group(2)), d = Integer.parseInt(m.group(3));
             if (!valid(y, mo, d)) continue;
             return y < 1700 ? toGregorian(y, mo, d) : new int[]{y, mo, d};
         }
+        Matcher m2 = MD.matcher(s);
+        while (m2.find()) {
+            int[] j = inferMd(Integer.parseInt(m2.group(1)), Integer.parseInt(m2.group(2)));
+            if (j != null) return toGregorian(j[0], j[1], j[2]);
+        }
         return null;
+    }
+
+    /** Jalali month/day -> {jy, jm, jd} using the current Jalali year (previous year if it would be >60 days ahead). */
+    static int[] inferMd(int m, int d) {
+        if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+        Calendar c = Calendar.getInstance();
+        int jy = toJalali(c.get(Calendar.YEAR), c.get(Calendar.MONTH) + 1, c.get(Calendar.DAY_OF_MONTH))[0];
+        int[] g = toGregorian(jy, m, d);
+        if (epochDay(g[0], g[1], g[2]) > today() + 60) jy--;
+        return new int[]{jy, m, d};
     }
 }

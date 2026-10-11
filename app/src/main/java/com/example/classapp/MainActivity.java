@@ -3,6 +3,7 @@ package com.example.classapp;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.net.Uri;
@@ -30,6 +31,8 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -48,7 +51,7 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 public class MainActivity extends Activity {
-    static final int PICK_STUDENTS = 10, PICK_CLASSES = 11, PICK_REPORT = 12, PICK_BACKUP = 13, PICK_SAVE_BACKUP = 14, PICK_EXPORT = 15;
+    static final int PICK_STUDENTS = 10, PICK_CLASSES = 11, PICK_REPORT = 12, PICK_BACKUP = 13, PICK_SAVE_BACKUP = 14, PICK_EXPORT = 15, PICK_IMAGE = 16;
     static final int MAX_FILE = 20 * 1024 * 1024;
 
     interface Submit { boolean go(); }
@@ -79,6 +82,7 @@ public class MainActivity extends Activity {
     Store st;
     String fClass = "", fTeacher = ""; // filters of the manager's overall report
     String pendingExport = "";
+    byte[] pendingPng;
     LinearLayout root;
     Runnable backAction;
 
@@ -542,6 +546,7 @@ public class MainActivity extends Activity {
         base(o.optString("date") + (o.optString("class").isEmpty() ? "" : " — " + o.optString("class")), this::reportsPage);
         btn("✏️ ویرایش", x -> editReport(i));
         exportButtons("report-" + o.optString("date").replace('/', '-'), () -> o.optString("text"));
+        imageButtons("report-" + o.optString("date").replace('/', '-'), () -> o.optString("text"));
         btn("🗑️ حذف گزارش", x -> confirm("حذف گزارش", "این گزارش حذف شود؟", "حذف", () -> {
             st.reports.remove(i);
             st.save();
@@ -700,16 +705,15 @@ public class MainActivity extends Activity {
 
     /** The widgets of one open form; read back with collect(). */
     final class FormUi {
-        Spinner teacher, cls;
-        EditText date, book, wb, other, hw, general;
+        Spinner cls;
+        EditText teacher, date, book, wb, other, hw, general;
         final List<String> members = new ArrayList<>(), options = new ArrayList<>(), teachers = new ArrayList<>(), classNames = new ArrayList<>();
         final Map<String, CheckBox> absent = new LinkedHashMap<>(), late = new LinkedHashMap<>();
         final Map<String, List<CheckBox>> opts = new LinkedHashMap<>();
         final Map<String, EditText> others = new LinkedHashMap<>();
 
         String teacherName() {
-            int p = teacher.getSelectedItemPosition();
-            return p <= 0 || p >= teachers.size() ? "" : teachers.get(p);
+            return teacher.getText().toString().trim();
         }
 
         String className() {
@@ -747,17 +751,14 @@ public class MainActivity extends Activity {
             return;
         }
         // header: teacher, date, class
-        u.teachers.add("(بدون نام)");
         u.teachers.addAll(st.teachers());
         String tsel = !teacher0.isEmpty() ? teacher0 : st.lastTeacher();
-        if (!tsel.isEmpty() && !u.teachers.contains(tsel)) u.teachers.add(tsel);
-        text("معلم", 14);
-        u.teacher = new Spinner(this);
-        ArrayAdapter<String> ta = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, u.teachers);
-        ta.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        u.teacher.setAdapter(ta);
-        u.teacher.setSelection(Math.max(0, u.teachers.indexOf(tsel)));
+        u.teacher = edit("نام معلم", tsel, false);
         root.addView(u.teacher);
+        if (!u.teachers.isEmpty()) {
+            btn("👩‍🏫 انتخاب از لیست معلم‌ها", x -> new AlertDialog.Builder(this).setTitle("معلم")
+                    .setItems(u.teachers.toArray(new String[0]), (d, w) -> u.teacher.setText(u.teachers.get(w))).show());
+        }
         u.date = edit("تاریخ (مثلاً 1405/07/13)", date0.isEmpty() ? JalaliDate.todayJalali() : date0, false);
         root.addView(u.date);
         u.classNames.add("(انتخاب کلاس)");
@@ -806,8 +807,9 @@ public class MainActivity extends Activity {
             public void onNothingSelected(AdapterView<?> parent) {
             }
         });
-        btn("💾 ذخیره گزارش", x -> saveForm(idx, u, false));
-        btn("📨 ذخیره و ارسال در پیام‌رسان", x -> saveForm(idx, u, true));
+        btn("💾 ذخیره گزارش", x -> saveForm(idx, u, 0));
+        btn("📨 ذخیره و ارسال در پیام‌رسان", x -> saveForm(idx, u, 1));
+        btn("🖼 ذخیره و ارسال به‌صورت تصویر", x -> saveForm(idx, u, 2));
         btn("👁 پیش‌نمایش متن", x -> {
             String cn = u.className();
             ReportForm f = u.collect();
@@ -888,7 +890,7 @@ public class MainActivity extends Activity {
         root.addView(card, cp);
     }
 
-    void saveForm(final int idx, final FormUi u, final boolean send) {
+    void saveForm(final int idx, final FormUi u, final int send) {
         final String cn = u.className();
         if (cn.isEmpty()) {
             toast("کلاس را انتخاب کنید");
@@ -901,7 +903,8 @@ public class MainActivity extends Activity {
         final String text = f.toText(tn, ds, cn, u.members, this::displayName);
         final Runnable done = () -> {
             if (!tn.isEmpty()) st.setLastTeacher(tn);
-            if (send) {
+            if (send == 2) shareImage(text);
+            else if (send == 1) {
                 Intent i = new Intent(Intent.ACTION_SEND);
                 i.setType("text/plain");
                 i.putExtra(Intent.EXTRA_TEXT, text);
@@ -1131,11 +1134,11 @@ public class MainActivity extends Activity {
 
     /** Two buttons: save as a .txt file, or share the text (Telegram, WhatsApp, Eitaa, ...). */
     void exportButtons(final String name, final TextSource src) {
-        btn("📤 ذخیره به‌صورت فایل (TXT)", x -> exportFile(name + "-" + new SimpleDateFormat("yyyyMMdd", Locale.US).format(new Date()) + ".txt", src.get()));
+        btn("📤 ذخیره به‌صورت فایل (TXT)", x -> exportFile(name + "-" + new SimpleDateFormat("yyyyMMdd", Locale.US).format(new Date()) + ".txt", Reports.withSchool(src.get())));
         btn("📨 ارسال در پیام‌رسان", x -> {
             Intent i = new Intent(Intent.ACTION_SEND);
             i.setType("text/plain");
-            i.putExtra(Intent.EXTRA_TEXT, src.get());
+            i.putExtra(Intent.EXTRA_TEXT, Reports.withSchool(src.get()));
             startActivity(Intent.createChooser(i, "ارسال گزارش"));
         });
     }
@@ -1147,6 +1150,67 @@ public class MainActivity extends Activity {
         i.setType("text/plain");
         i.putExtra(Intent.EXTRA_TITLE, fileName);
         startActivityForResult(i, PICK_EXPORT);
+    }
+
+    /** The report as a picture with the faint logo; null (after a message) when it cannot be drawn. */
+    byte[] reportPng(String text) {
+        try {
+            Bitmap b = ReportImage.render(this, Reports.withSchool(text));
+            if (b == null) {
+                toast("گزارش برای یک تصویر بیش از حد طولانی است؛ از ارسال متنی استفاده کنید");
+                return null;
+            }
+            return ReportImage.png(b);
+        } catch (Exception | OutOfMemoryError e) {
+            toast("ساخت تصویر ممکن نشد؛ از ارسال متنی استفاده کنید");
+            return null;
+        }
+    }
+
+    void shareImage(String text) {
+        byte[] png = reportPng(text);
+        if (png == null) return;
+        try {
+            File dir = new File(getCacheDir(), "share");
+            File[] old = dir.listFiles();
+            if (old != null) for (File f : old) f.delete();
+            if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("cache");
+            String name = "report-" + System.currentTimeMillis() + ".png";
+            try (FileOutputStream o = new FileOutputStream(new File(dir, name))) {
+                o.write(png);
+            }
+            Intent i = new Intent(Intent.ACTION_SEND);
+            i.setType("image/png");
+            i.putExtra(Intent.EXTRA_STREAM, Uri.parse("content://" + ShareProvider.AUTHORITY + "/" + name));
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(Intent.createChooser(i, "ارسال گزارش به‌صورت تصویر"));
+        } catch (Exception e) {
+            toast("ارسال تصویر ممکن نشد؛ «ذخیره تصویر» یا ارسال متنی را امتحان کنید");
+        }
+    }
+
+    void saveImage(String text, String fileName) {
+        byte[] png = reportPng(text);
+        if (png == null) return;
+        pendingPng = png;
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("image/png");
+        i.putExtra(Intent.EXTRA_TITLE, fileName);
+        startActivityForResult(i, PICK_IMAGE);
+    }
+
+    void writeImage(Uri u) throws Exception {
+        try (OutputStream out = getContentResolver().openOutputStream(u, "wt")) {
+            if (out == null || pendingPng == null) throw new IOException("امکان نوشتن در فایل نیست");
+            out.write(pendingPng);
+        }
+        toast("تصویر گزارش ذخیره شد");
+    }
+
+    void imageButtons(final String name, final TextSource src) {
+        btn("🖼 ارسال به‌صورت تصویر (با لوگوی کم‌رنگ)", x -> shareImage(src.get()));
+        btn("💾 ذخیره تصویر (PNG)", x -> saveImage(src.get(), name + "-" + new SimpleDateFormat("yyyyMMdd", Locale.US).format(new Date()) + ".png"));
     }
 
     /** UTF-8 with BOM so Persian text opens correctly in Notepad and similar apps. */
@@ -1240,13 +1304,14 @@ public class MainActivity extends Activity {
                 if (!ncls.isEmpty() && !nrc.isEmpty() && !nrc.equals(ncls)) continue; // another class's report
                 total++;
                 String date = r.optString("date");
-                String hdr = "[ " + date + " | " + rcls + " ]\n";
                 Hit h = hit(rtext, key, pat, heads);
-                String lateNote = h.late ? "با تأخیر آمد\n" : "";
+                // the day's attendance status is part of the date line, so it stands out
+                String hdr = "[ " + date + " | " + rcls + " ]" + (h.absent ? "   ❌ غایب" : h.late ? "   ⏰ تأخیر" : "") + "\n";
+                String lateNote = "";
                 if (h.absent || !h.text.isEmpty()) {
                     entries.add(new Summary.Entry(date, h.absent, h.late, h.body));
                     o.found = true;
-                    out.append(hdr).append(h.absent ? "غایب بود\n" : "").append(lateNote).append(h.text).append("\n");
+                    out.append(hdr).append(h.text).append("\n");
                 } else if (!ncls.isEmpty() && nrc.equals(ncls) && !(clash > 0 && firstNameAppears(rtext, nf))
                         && (Reports.hasStatusHeader(rtext) || mentionsAnyMember(rtext, cls, heads))) {
                     entries.add(Summary.Entry.implied(date, h.late));
@@ -1255,7 +1320,7 @@ public class MainActivity extends Activity {
                 } else if (h.late) {
                     entries.add(new Summary.Entry(date, false, true, ""));
                     o.found = true;
-                    out.append(hdr).append(lateNote).append("\n");
+                    out.append(hdr).append("\n");
                 }
             }
         }
@@ -1275,7 +1340,6 @@ public class MainActivity extends Activity {
         String note = st.note("studentNote" + days + "_" + s.optString("code"));
         if (!note.trim().isEmpty()) t.append("\nتوضیحات: ").append(note.trim()).append("\n");
         t.append("\n");
-        if (!o.summary.isEmpty()) t.append(o.summary).append("\n\n");
         return t.append(o.details).toString();
     }
 
@@ -1302,7 +1366,6 @@ public class MainActivity extends Activity {
                 () -> studentText(fsi, days, p, heads));
         backBtn();
         StudentOut o = computeStudent(si, days, p, heads);
-        if (!o.summary.isEmpty()) text(o.summary, 15).setTextIsSelectable(true);
         text(o.details, 16).setTextIsSelectable(true);
     }
 
@@ -1612,6 +1675,7 @@ public class MainActivity extends Activity {
                 case PICK_BACKUP: restoreBackup(u); break;
                 case PICK_SAVE_BACKUP: writeBackup(u); break;
                 case PICK_EXPORT: writeExport(u); break;
+                case PICK_IMAGE: writeImage(u); break;
                 case PICK_REPORT: importReportTxt(u); break;
                 case PICK_STUDENTS: importStudents(u); break;
                 case PICK_CLASSES: importClasses(u); break;

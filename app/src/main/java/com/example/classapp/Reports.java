@@ -19,6 +19,19 @@ final class Reports {
         return n.replaceAll("[^\\p{L}\\p{N}\\s]+", " ").replaceAll("\\s+", " ").trim();
     }
 
+    static final String SCHOOL = "Moradi English Class";
+
+    /** Every report starts with the school name; texts that already start with it are left as they are. */
+    static String withSchool(String text) {
+        String t = text == null ? "" : text;
+        for (String line : t.split("\\r?\\n")) {
+            if (line.trim().isEmpty()) continue;
+            if (Text.norm(line).equals(Text.norm(SCHOOL))) return t;
+            break;
+        }
+        return SCHOOL + "\n" + t;
+    }
+
     static Pattern token(String n) {
         return Pattern.compile("(^|[^\\p{L}\\p{N}])" + Pattern.quote(n) + "([^\\p{L}\\p{N}]|$)");
     }
