@@ -16,7 +16,7 @@ import java.util.Set;
 
 /** All app data (students, classes, reports, manual notes), persisted as JSON in SharedPreferences. */
 final class Store {
-    static final int VERSION = 6;
+    static final int VERSION = 7;
     static final int MAX_OPTIONS = 8;
     static final String[] DEFAULT_TEACHERS = {"Asal", "Asha"};
     static final String[] DEFAULT_OPTIONS = {
@@ -24,8 +24,10 @@ final class Store {
             "معنی با ارفاق پذیرفته شد", "تمرینات انجام نداده بودند", "تمرینات ناقص انجام شده بود"};
 
     private final SharedPreferences sp;
-    JSONArray students, classes, reports;
+    JSONArray students, classes, reports, events;
     JSONObject notes, settings;
+    /** Finance data: separate from the normal backup (never merged into / exported with it). */
+    JSONObject fin;
 
     Store(Context c) {
         sp = c.getSharedPreferences("class_data", 0);
@@ -34,6 +36,8 @@ final class Store {
         reports = clean(arr("reports"));
         notes = obj("notes");
         settings = obj("settings");
+        events = clean(arr("events"));
+        fin = Fin.fix(obj("fin"));
         normalize();
         migrateOldNotes();
     }
@@ -42,7 +46,8 @@ final class Store {
 
     void save() {
         sp.edit().putString("students", students.toString()).putString("classes", classes.toString())
-                .putString("reports", reports.toString()).putString("notes", notes.toString()).putString("settings", settings.toString()).apply();
+                .putString("reports", reports.toString()).putString("notes", notes.toString()).putString("settings", settings.toString())
+                .putString("events", events.toString()).putString("fin", fin.toString()).apply();
     }
 
     private JSONArray arr(String k) {
@@ -182,6 +187,73 @@ final class Store {
         save();
     }
 
+    // ---------- manager mode (device-local: never part of any backup) ----------
+
+    boolean manager() {
+        return sp.getBoolean("manager", false);
+    }
+
+    void setManager(boolean on) {
+        sp.edit().putBoolean("manager", on).apply();
+    }
+
+    // ---------- calendar events ----------
+
+    /** Adds or replaces (same id) an event; stamps it with the edit time. */
+    void putEvent(JSONObject ev) {
+        try {
+            if (ev.optString("id").isEmpty()) ev.put("id", "E" + System.currentTimeMillis() + "_" + events.length());
+            ev.put("ts", System.currentTimeMillis());
+            String id = ev.optString("id");
+            for (int i = 0; i < events.length(); i++) {
+                if (id.equals(events.optJSONObject(i).optString("id"))) {
+                    events.put(i, ev);
+                    save();
+                    return;
+                }
+            }
+            events.put(ev);
+            save();
+        } catch (JSONException ignored) {
+            // skip
+        }
+    }
+
+    /** Deleting leaves a dated tombstone so that a merge from another phone does not bring the event back. */
+    void removeEvent(String id) {
+        for (int i = 0; i < events.length(); i++) {
+            if (id.equals(events.optJSONObject(i).optString("id"))) {
+                try {
+                    events.put(i, new JSONObject().put("id", id).put("type", "deleted").put("ts", System.currentTimeMillis()));
+                } catch (JSONException ignored) {
+                    // skip
+                }
+                save();
+                return;
+            }
+        }
+    }
+
+    /** Saves (or, when the text is empty, removes) the lesson plan of one class session. */
+    void setLesson(String cls, String date, String text) {
+        String id = Cal.lessonId(cls, date);
+        if (text.trim().isEmpty()) {
+            removeEvent(id);
+            return;
+        }
+        try {
+            putEvent(new JSONObject().put("id", id).put("type", Cal.LESSON).put("date", date).put("cls", cls).put("note", text.trim()));
+        } catch (JSONException ignored) {
+            // skip
+        }
+    }
+
+    // ---------- finance ----------
+
+    void saveFin() {
+        sp.edit().putString("fin", fin.toString()).apply();
+    }
+
     // ---------- notes ----------
 
     String note(String key) {
@@ -298,7 +370,7 @@ final class Store {
         return new JSONObject().put("app", "class").put("version", VERSION)
                 .put("exportedAt", System.currentTimeMillis())
                 .put("students", students).put("classes", classes).put("reports", reports)
-                .put("notes", notes).put("settings", settings).toString(2);
+                .put("notes", notes).put("settings", settings).put("events", events).toString(2);
     }
 
     /** Returns an error message, or null when the backup structure is valid. Older backups (without notes) are valid. */
@@ -318,6 +390,7 @@ final class Store {
         notes = n != null ? n : new JSONObject();
         JSONObject sj = r.optJSONObject("settings"); // older backups have none: keep the current settings
         if (sj != null) settings = sj;
+        if (r.optJSONArray("events") != null) events = clean(r.optJSONArray("events")); // older backups have none: keep the current events
         normalize();
         save();
     }

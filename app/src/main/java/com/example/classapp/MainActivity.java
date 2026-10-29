@@ -51,7 +51,7 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 public class MainActivity extends Activity {
-    static final int PICK_STUDENTS = 10, PICK_CLASSES = 11, PICK_REPORT = 12, PICK_BACKUP = 13, PICK_SAVE_BACKUP = 14, PICK_EXPORT = 15, PICK_IMAGE = 16;
+    static final int PICK_STUDENTS = 10, PICK_CLASSES = 11, PICK_REPORT = 12, PICK_BACKUP = 13, PICK_SAVE_BACKUP = 14, PICK_EXPORT = 15, PICK_IMAGE = 16, PICK_FIN_SAVE = 17, PICK_FIN_RESTORE = 18;
     static final int MAX_FILE = 20 * 1024 * 1024;
 
     interface Submit { boolean go(); }
@@ -80,6 +80,12 @@ public class MainActivity extends Activity {
     }
 
     Store st;
+    private CalUi calUi;
+
+    CalUi cal() {
+        if (calUi == null) calUi = new CalUi(this);
+        return calUi;
+    }
     String fClass = "", fTeacher = ""; // filters of the manager's overall report
     String pendingExport = "";
     byte[] pendingPng;
@@ -282,11 +288,13 @@ public class MainActivity extends Activity {
 
     void home() {
         base("کلاس", null);
-        TextView v = text("مدیریت ساده آموزشگاه زبان\nنسخه 1.8 • Android", 16);
+        TextView v = text("مدیریت ساده آموزشگاه زبان\nنسخه 1.9 • Android", 16);
         v.setGravity(Gravity.CENTER);
         btn("👨‍🎓 زبان‌آموزان", x -> studentsPage());
         btn("🏫 کلاس‌ها", x -> classesPage());
         btn("📝 گزارش روزانه", x -> reportsPage());
+        btn("📆 تقویم آموزشی", x -> cal().month());
+        if (st.manager()) btn("💰 مالی", x -> cal().finHome());
         btn("📊 گزارش هفتگی", x -> periodReport(7));
         btn("📅 گزارش ماهانه", x -> periodReport(30));
         btn("⚙️ تنظیمات و پشتیبان‌گیری", x -> settings());
@@ -1604,9 +1612,13 @@ public class MainActivity extends Activity {
         base("تنظیمات", this::home);
         btn("👩‍🏫 معلم‌ها", x -> listEditor("معلم‌ها", "نام هر معلم در یک خط", st.teachers(), 0));
         btn("☑️ توضیحات آماده وضعیت بچه‌ها (تا ۸ مورد)", x -> listEditor("توضیحات آماده", "هر توضیح در یک خط (حداکثر ۸ مورد)", st.options(), Store.MAX_OPTIONS));
+        btn(st.manager() ? "👔 حالت مدیر: روشن (برای خاموش کردن بزنید)" : "👔 حالت مدیر: خاموش (برای روشن کردن بزنید)", x -> {
+            st.setManager(!st.manager());
+            settings();
+        });
         btn("💾 پشتیبان‌گیری از داده‌ها", x -> backup());
         btn("♻️ بازیابی / ادغام پشتیبان", x -> pick(PICK_BACKUP));
-        btn("ℹ️ درباره برنامه", x -> info("کلاس 1.8", "عامل سبک مدیریت آموزشگاه زبان\nAndroid اول، iOS در مرحله بعد\nداده‌ها روی خود گوشی نگهداری می‌شوند."));
+        btn("ℹ️ درباره برنامه", x -> info("کلاس 1.9", "عامل سبک مدیریت آموزشگاه زبان\nAndroid اول، iOS در مرحله بعد\nداده‌ها روی خود گوشی نگهداری می‌شوند."));
         backBtn();
     }
 
@@ -1705,6 +1717,8 @@ public class MainActivity extends Activity {
                 case PICK_SAVE_BACKUP: writeBackup(u); break;
                 case PICK_EXPORT: writeExport(u); break;
                 case PICK_IMAGE: writeImage(u); break;
+                case PICK_FIN_SAVE: cal().writeFinBackup(u); break;
+                case PICK_FIN_RESTORE: cal().restoreFin(u); break;
                 case PICK_REPORT: importReportTxt(u); break;
                 case PICK_STUDENTS: importStudents(u); break;
                 case PICK_CLASSES: importClasses(u); break;

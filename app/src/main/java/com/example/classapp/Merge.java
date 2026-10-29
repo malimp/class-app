@@ -17,12 +17,13 @@ final class Merge {
     private Merge() {}
 
     static final class Result {
-        int students, classes, reports, duplicateReports, members, notes;
+        int students, classes, reports, duplicateReports, members, notes, events, eventsUpdated;
 
         String summary() {
             return "زبان‌آموز جدید: " + students + "\nکلاس جدید: " + classes + "\nعضو جدید در کلاس‌ها: " + members
                     + "\nگزارش جدید: " + reports + "\nگزارش تکراری (نادیده گرفته شد): " + duplicateReports
-                    + "\nیادداشت جدید: " + notes;
+                    + "\nیادداشت جدید: " + notes + "\nرویداد و برنامه درسی جدید: " + events
+                    + "\nرویداد و برنامه درسی به‌روز شده (نسخه جدیدتر): " + eventsUpdated;
         }
     }
 
@@ -122,6 +123,23 @@ final class Merge {
                     st.notes.put(key, nn.optString(k));
                     res.notes++;
                 }
+            }
+        }
+        // calendar events and lesson plans: by id; a newer edit (ts) replaces the older one, nothing is deleted
+        JSONArray ine = in.optJSONArray("events");
+        for (int i = 0; ine != null && i < ine.length(); i++) {
+            JSONObject e = ine.optJSONObject(i);
+            if (e == null || e.optString("id").isEmpty()) continue;
+            int at = -1;
+            for (int k = 0; k < st.events.length() && at < 0; k++) {
+                if (e.optString("id").equals(st.events.optJSONObject(k).optString("id"))) at = k;
+            }
+            if (at < 0) {
+                st.events.put(new JSONObject(e.toString()));
+                res.events++;
+            } else if (e.optLong("ts", 0) > st.events.optJSONObject(at).optLong("ts", 0)) {
+                st.events.put(at, new JSONObject(e.toString()));
+                res.eventsUpdated++;
             }
         }
         // settings: union of teachers; options only when this phone has none of its own
