@@ -166,10 +166,7 @@ final class CalUi {
     }
 
     private void sendText(String text) {
-        Intent i = new Intent(Intent.ACTION_SEND);
-        i.setType("text/plain");
-        i.putExtra(Intent.EXTRA_TEXT, Reports.plain(text));
-        a.startActivity(Intent.createChooser(i, "ارسال"));
+        a.sendText(text, false);
     }
 
     /** Valid Jalali date typed by the user -> "yyyy/MM/dd", else null. */

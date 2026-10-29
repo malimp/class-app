@@ -20,6 +20,7 @@ import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
@@ -564,10 +565,54 @@ public class MainActivity extends Activity {
         final ArrayList<Integer> order = new ArrayList<>();
         for (int i = 0; i < st.reports.length(); i++) order.add(i);
         Collections.sort(order, (a, b) -> Long.compare(reportDay(st.reports.optJSONObject(b)), reportDay(st.reports.optJSONObject(a))));
-        for (final int i : order) {
-            JSONObject o = st.reports.optJSONObject(i);
-            String cls = o.optString("class"), t = o.optString("teacher");
-            row2(o.optString("date") + (cls.isEmpty() ? "" : " — " + cls) + (t.isEmpty() ? "" : " — " + t), Reports.preview(o.optString("text")), x -> showReport(i));
+        // grouped by class (class list order, then other classes, then reports without a class); newest first inside a group
+        final Map<String, List<Integer>> groups = new LinkedHashMap<>();
+        final Map<String, String> names = new LinkedHashMap<>();
+        for (int c = 0; c < st.classes.length(); c++) {
+            String cn = st.classes.optJSONObject(c).optString("name");
+            groups.put(Text.norm(cn), new ArrayList<Integer>());
+            names.put(Text.norm(cn), cn);
+        }
+        for (int i : order) {
+            String cls = st.reports.optJSONObject(i).optString("class").trim();
+            String key = cls.isEmpty() ? "" : Text.norm(cls);
+            if (!groups.containsKey(key)) {
+                groups.put(key, new ArrayList<Integer>());
+                names.put(key, cls);
+            }
+            groups.get(key).add(i);
+        }
+        List<String> keys = new ArrayList<>(groups.keySet());
+        if (keys.remove("")) keys.add("");
+        for (String key : keys) {
+            final List<Integer> g = groups.get(key);
+            if (g.isEmpty()) continue;
+            final String title = (key.isEmpty() ? "بدون کلاس" : "🏫 " + names.get(key)) + " — " + g.size() + " گزارش";
+            final TextView head = new TextView(this);
+            head.setText(title + "  ▾");
+            head.setTextSize(17);
+            head.setTextColor(Color.rgb(30, 50, 90));
+            head.setBackgroundColor(Color.rgb(214, 222, 240));
+            head.setPadding(dp(12), dp(12), dp(12), dp(12));
+            LinearLayout.LayoutParams hp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            hp.setMargins(0, dp(14), 0, dp(3));
+            root.addView(head, hp);
+            final LinearLayout box = new LinearLayout(this);
+            box.setOrientation(LinearLayout.VERTICAL);
+            root.addView(box, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            head.setOnClickListener(x -> {
+                boolean open = box.getVisibility() != View.GONE;
+                box.setVisibility(open ? View.GONE : View.VISIBLE);
+                head.setText(title + (open ? "  ◂" : "  ▾"));
+            });
+            LinearLayout saved = root;
+            root = box;
+            for (final int i : g) {
+                JSONObject o = st.reports.optJSONObject(i);
+                String t = o.optString("teacher");
+                row2(o.optString("date") + (t.isEmpty() ? "" : " — " + t), Reports.preview(o.optString("text")), x -> showReport(i));
+            }
+            root = saved;
         }
     }
 
@@ -935,12 +980,7 @@ public class MainActivity extends Activity {
         final Runnable done = () -> {
             if (!tn.isEmpty()) st.setLastTeacher(tn);
             if (send == 2) shareImage(text);
-            else if (send == 1) {
-                Intent i = new Intent(Intent.ACTION_SEND);
-                i.setType("text/plain");
-                i.putExtra(Intent.EXTRA_TEXT, Reports.withSchool(text));
-                startActivity(Intent.createChooser(i, "ارسال گزارش"));
-            }
+            else if (send == 1) sendText(text, true);
             reportsPage();
         };
         try {
@@ -1006,9 +1046,9 @@ public class MainActivity extends Activity {
     }
 
     String periodHeader(Period p, int days) {
-        StringBuilder s = new StringBuilder("بازه: " + days + " روز اخیر • تعداد گزارش: " + p.idx.size());
-        if (p.fallback > 0) s.append("\n⚠️ ").append(p.fallback).append(" گزارش تاریخ قابل تشخیص ندارند و بر اساس زمان ثبت در برنامه حساب شده‌اند.");
-        if (p.undated > 0) s.append("\n⚠️ ").append(p.undated).append(" گزارش هیچ تاریخی ندارند و در همه بازه‌ها نمایش داده می‌شوند.");
+        StringBuilder s = new StringBuilder();
+        if (p.fallback > 0) s.append("⚠️ ").append(p.fallback).append(" گزارش تاریخ قابل تشخیص ندارند و بر اساس زمان ثبت در برنامه حساب شده‌اند.");
+        if (p.undated > 0) s.append(s.length() > 0 ? "\n⚠️ " : "⚠️ ").append(p.undated).append(" گزارش هیچ تاریخی ندارند و در همه بازه‌ها نمایش داده می‌شوند.");
         return s.toString();
     }
 
@@ -1115,7 +1155,7 @@ public class MainActivity extends Activity {
     String overallText(int days) {
         Period p = period(days);
         StringBuilder s = new StringBuilder(periodTitle(days) + " — گزارش کلی کلاس\n");
-        s.append(periodHeader(p, days)).append("\n").append("کلاس: ").append(fClass.isEmpty() ? "همه" : fClass).append("\n");
+        s.append("کلاس: ").append(fClass.isEmpty() ? "همه" : fClass).append("\n");
         String note = st.note("overallNote" + days);
         if (!note.trim().isEmpty()) s.append("\nتوضیحات: ").append(note.trim()).append("\n");
         s.append("\n").append(overallBody(days, p, fClass, fTeacher, false));
@@ -1152,7 +1192,7 @@ public class MainActivity extends Activity {
     void overallPeriod(final int days) {
         base("گزارش کلی", () -> periodReport(days));
         Period p = period(days);
-        text(periodHeader(p, days), 14);
+        if (!periodHeader(p, days).isEmpty()) text(periodHeader(p, days), 14);
         filterButton(days, true);
         filterButton(days, false);
         noteEditor("overallNote" + days);
@@ -1170,13 +1210,62 @@ public class MainActivity extends Activity {
 
     /** hideTeacher: daily reports carry the teacher as an invisible marker; period reports never do. */
     void exportButtons(final String name, final TextSource src, final boolean hideTeacher) {
-        btn("📤 ذخیره به‌صورت فایل (TXT)", x -> exportFile(name + "-" + new SimpleDateFormat("yyyyMMdd", Locale.US).format(new Date()) + ".txt", (hideTeacher ? Reports.withSchool(src.get()) : Reports.plain(src.get()))));
-        btn("📨 ارسال در پیام‌رسان", x -> {
+        btn("📤 ذخیره به‌صورت فایل (TXT)", x -> previewText("پیش‌نمایش فایل", Reports.plain(src.get()), "ذخیره",
+                () -> exportFile(name + "-" + new SimpleDateFormat("yyyyMMdd", Locale.US).format(new Date()) + ".txt", (hideTeacher ? Reports.withSchool(src.get()) : Reports.plain(src.get())))));
+        btn("📨 ارسال در پیام‌رسان", x -> sendText(src.get(), hideTeacher));
+    }
+
+    /** Every report is shown first exactly as the receiver will see it; it is sent / saved only after «ارسال» / «ذخیره». */
+    void previewText(String title, String shown, String okLabel, final Runnable ok) {
+        TextView t = new TextView(this);
+        t.setText(shown);
+        t.setTextSize(15);
+        t.setTextIsSelectable(true);
+        t.setPadding(dp(4), dp(4), dp(4), dp(4));
+        LinearLayout l = form();
+        l.addView(t);
+        new AlertDialog.Builder(this).setTitle(title).setView(scroll(l))
+                .setPositiveButton(okLabel, (d, w) -> ok.run()).setNegativeButton("بازگشت", null).show();
+    }
+
+    /** Preview, then the share sheet. hide: the daily-report format that carries the teacher as an invisible marker. */
+    void sendText(final String text, final boolean hide) {
+        previewText("پیش‌نمایش گزارش", Reports.plain(text), "ارسال", () -> {
             Intent i = new Intent(Intent.ACTION_SEND);
             i.setType("text/plain");
-            i.putExtra(Intent.EXTRA_TEXT, hideTeacher ? Reports.withSchool(src.get()) : Reports.plain(src.get()));
+            i.putExtra(Intent.EXTRA_TEXT, hide ? Reports.withSchool(text) : Reports.plain(text));
             startActivity(Intent.createChooser(i, "ارسال گزارش"));
         });
+    }
+
+    interface PngAction { void go(byte[] png); }
+
+    /** The report picture is drawn and shown first; the action runs only after the OK button. */
+    void previewImage(String text, String okLabel, final PngAction act) {
+        final Bitmap b;
+        try {
+            b = ReportImage.render(this, Reports.plain(text));
+        } catch (Exception | OutOfMemoryError e) {
+            toast("ساخت تصویر ممکن نشد؛ از ارسال متنی استفاده کنید");
+            return;
+        }
+        if (b == null) {
+            toast("گزارش برای یک تصویر بیش از حد طولانی است؛ از ارسال متنی استفاده کنید");
+            return;
+        }
+        ImageView iv = new ImageView(this);
+        iv.setImageBitmap(b);
+        iv.setAdjustViewBounds(true);
+        LinearLayout l = form();
+        l.addView(iv, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        new AlertDialog.Builder(this).setTitle("پیش‌نمایش تصویر").setView(scroll(l))
+                .setPositiveButton(okLabel, (d, w) -> {
+                    try {
+                        act.go(ReportImage.png(b));
+                    } catch (Exception | OutOfMemoryError e) {
+                        toast("ساخت تصویر ممکن نشد؛ از ارسال متنی استفاده کنید");
+                    }
+                }).setNegativeButton("بازگشت", null).show();
     }
 
     void exportFile(String fileName, String content) {
@@ -1204,8 +1293,10 @@ public class MainActivity extends Activity {
     }
 
     void shareImage(String text) {
-        byte[] png = reportPng(text);
-        if (png == null) return;
+        previewImage(text, "ارسال", this::shareImagePng);
+    }
+
+    void shareImagePng(byte[] png) {
         try {
             File dir = new File(getCacheDir(), "share");
             File[] old = dir.listFiles();
@@ -1225,15 +1316,15 @@ public class MainActivity extends Activity {
         }
     }
 
-    void saveImage(String text, String fileName) {
-        byte[] png = reportPng(text);
-        if (png == null) return;
-        pendingPng = png;
-        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
-        i.addCategory(Intent.CATEGORY_OPENABLE);
-        i.setType("image/png");
-        i.putExtra(Intent.EXTRA_TITLE, fileName);
-        startActivityForResult(i, PICK_IMAGE);
+    void saveImage(String text, final String fileName) {
+        previewImage(text, "ذخیره", png -> {
+            pendingPng = png;
+            Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("image/png");
+            i.putExtra(Intent.EXTRA_TITLE, fileName);
+            startActivityForResult(i, PICK_IMAGE);
+        });
     }
 
     void writeImage(Uri u) throws Exception {
@@ -1264,13 +1355,60 @@ public class MainActivity extends Activity {
             toast("زبان‌آموزی وجود ندارد");
             return;
         }
-        String[] a = new String[st.students.length()];
-        for (int i = 0; i < a.length; i++) {
-            JSONObject o = st.students.optJSONObject(i);
-            a[i] = o.optString("first") + " " + o.optString("last") + " — " + o.optString("code");
-        }
-        new AlertDialog.Builder(this).setTitle("انتخاب زبان‌آموز").setItems(a, (d, w) -> studentReport(w, days))
-                .setNegativeButton("لغو", null).show();
+        final EditText q = edit("🔎 جستجوی نام زبان‌آموز", "", false);
+        final LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout l = form();
+        l.addView(q);
+        l.addView(list);
+        final AlertDialog dlg = new AlertDialog.Builder(this).setTitle("انتخاب زبان‌آموز").setView(scroll(l)).setNegativeButton("لغو", null).create();
+        final Runnable fill = () -> {
+            list.removeAllViews();
+            String f = Text.norm(q.getText().toString().trim());
+            int shown = 0;
+            for (int i = 0; i < st.students.length(); i++) {
+                final int idx = i;
+                JSONObject o = st.students.optJSONObject(i);
+                String nm = o.optString("first") + " " + o.optString("last");
+                String cn = st.classNameOf(o.optString("code"));
+                if (!f.isEmpty() && !Text.norm(nm).contains(f)) continue;
+                TextView t = new TextView(this);
+                t.setText(nm + (cn.isEmpty() ? "" : "  •  " + cn));
+                t.setTextSize(16);
+                t.setPadding(dp(12), dp(12), dp(12), dp(12));
+                t.setBackgroundColor(Color.rgb(240, 242, 248));
+                t.setOnClickListener(x -> {
+                    dlg.dismiss();
+                    studentReport(idx, days);
+                });
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                lp.setMargins(0, dp(3), 0, dp(3));
+                list.addView(t, lp);
+                shown++;
+            }
+            if (shown == 0) {
+                TextView t = new TextView(this);
+                t.setText("زبان‌آموزی با این نام پیدا نشد.");
+                t.setPadding(dp(8), dp(12), dp(8), dp(12));
+                list.addView(t);
+            }
+        };
+        q.addTextChangedListener(new android.text.TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int a, int b, int c) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence s, int a, int b, int c) {
+            }
+
+            @Override
+            public void afterTextChanged(android.text.Editable s) {
+                fill.run();
+            }
+        });
+        fill.run();
+        dlg.show();
     }
 
     /**
@@ -1347,7 +1485,7 @@ public class MainActivity extends Activity {
                 if (h.absent || !h.text.isEmpty()) {
                     entries.add(new Summary.Entry(date, h.absent, h.late, h.body));
                     o.found = true;
-                    out.append(hdr).append(h.text).append("\n");
+                    out.append(hdr).append(h.body).append("\n"); // only the remarks: the heading line with other students' names is not shown
                 } else if (!ncls.isEmpty() && nrc.equals(ncls) && !(clash > 0 && firstNameAppears(rtext, nf))
                         && (Reports.hasStatusHeader(rtext) || mentionsAnyMember(rtext, cls, heads))) {
                     entries.add(Summary.Entry.implied(date, h.late));
@@ -1372,7 +1510,6 @@ public class MainActivity extends Activity {
         StringBuilder t = new StringBuilder(periodTitle(days) + " — " + s.optString("first") + " " + s.optString("last") + "\n");
         String cls = st.classNameOf(s.optString("code"));
         if (!cls.isEmpty()) t.append("کلاس: ").append(cls).append("\n");
-        t.append(periodHeader(p, days)).append("\n");
         String note = st.note("studentNote" + days + "_" + s.optString("code"));
         if (!note.trim().isEmpty()) t.append("\nتوضیحات: ").append(note.trim()).append("\n");
         t.append("\n");
@@ -1396,7 +1533,7 @@ public class MainActivity extends Activity {
                     .append("از «بررسی نام‌های مشابه» برای جزئیات استفاده کنید.");
         }
         if (cls.isEmpty()) head.append("\nℹ️ این زبان‌آموز در هیچ کلاسی نیست؛ «حاضر بدون ذکر نام» فقط برای اعضای کلاس محاسبه می‌شود.");
-        text(head.toString(), 14);
+        if (!head.toString().trim().isEmpty()) text(head.toString().trim(), 14);
         noteEditor("studentNote" + days + "_" + s.optString("code"));
         final String fname = (days == 7 ? "weekly-" : "monthly-") + (first + "-" + last).replace(' ', '_');
         exportButtons(fname, () -> studentText(fsi, days, p, heads));
@@ -1410,7 +1547,7 @@ public class MainActivity extends Activity {
     String allStudentsText(int days) {
         Period p = period(days);
         Set<String> heads = heads();
-        StringBuilder t = new StringBuilder(periodTitle(days) + " — همه زبان‌آموزان\n").append(periodHeader(p, days)).append("\n");
+        StringBuilder t = new StringBuilder(periodTitle(days) + " — همه زبان‌آموزان\n");
         for (int i = 0; i < st.students.length(); i++) {
             t.append("\n==============================\n").append(studentText(i, days, p, heads));
         }
