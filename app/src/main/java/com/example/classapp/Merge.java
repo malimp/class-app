@@ -85,6 +85,14 @@ final class Merge {
                 ci = st.classes.length() - 1;
                 res.classes++;
             }
+            // the manager's newer edit of the class (dates, days and hours) reaches the other phones
+            JSONObject lc = st.classes.optJSONObject(ci);
+            if (lc != null && c.optLong("ts", 0) > lc.optLong("ts", 0)) {
+                for (String k : new String[]{"level", "start", "end", "days", "time", "notes", "sched"}) {
+                    if (c.has(k)) lc.put(k, c.opt(k));
+                }
+                lc.put("ts", c.optLong("ts", 0));
+            }
             JSONArray mem = c.optJSONArray("students");
             for (int j = 0; mem != null && j < mem.length(); j++) {
                 String local = map.get(mem.optString(j));

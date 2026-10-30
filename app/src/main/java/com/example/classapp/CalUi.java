@@ -589,13 +589,14 @@ final class CalUi {
         if (st0 == JalaliDate.INVALID) st0 = JalaliDate.today();
         if (en == JalaliDate.INVALID) en = st0 + 120;
         List<long[]> list = Cal.sessions(c, a.st.events, st0, en);
-        a.text("ساعت: " + (c.optString("time").isEmpty() ? "—" : c.optString("time")) + " • روزها: " + (c.optString("days").isEmpty() ? "—" : c.optString("days")) + " • " + list.size() + " جلسه", 14);
+        a.text("روزها و ساعت: " + Cal.scheduleText(c) + " • " + list.size() + " جلسه", 14);
         a.exportButtons("sessions-" + sc.replace(' ', '_'), () -> Cal.classSessionsText(cl, a.st.events));
         a.imageButtons("sessions-" + sc.replace(' ', '_'), () -> Cal.classSessionsText(cl, a.st.events));
         for (final long[] x : list) {
             JSONObject l = Cal.lesson(a.st.events, sc, Cal.fmt(x[0]));
             String nt = l == null ? "" : l.optString("note").trim();
-            a.row2("جلسه " + x[1] + " — " + Cal.dayHeader(x[0]), nt.isEmpty() ? "برنامهٔ درسی ثبت نشده" : "📖 " + nt,
+            String tm = Cal.timeAt(cl, x[0]);
+            a.row2("جلسه " + x[1] + " — " + Cal.dayHeader(x[0]) + (tm.isEmpty() ? "" : " — ساعت " + tm), nt.isEmpty() ? "برنامهٔ درسی ثبت نشده" : "📖 " + nt,
                     v -> lessonDialog(sc, Cal.fmt(x[0]), () -> sessionsPage(sc)));
         }
         a.backBtn();

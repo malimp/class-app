@@ -2,6 +2,7 @@ package com.example.classapp;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.TimePickerDialog;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.Color;
@@ -81,6 +82,8 @@ public class MainActivity extends Activity {
     }
 
     Store st;
+    /** Class groups of the daily-report list that the user opened (all groups start closed). */
+    final Set<String> openGroups = new HashSet<>();
     private CalUi calUi;
 
     CalUi cal() {
@@ -437,12 +440,15 @@ public class MainActivity extends Activity {
             classesPage();
         }));
         backBtn();
-        String[] keys = {"level", "start", "end", "days", "time", "notes"};
-        String[] labels = {"سطح/دوره", "شروع", "پایان", "روزها", "ساعت", "توضیحات"};
+        String[] keys = {"level", "start", "end", "notes"};
+        String[] labels = {"سطح/دوره", "شروع", "پایان", "توضیحات"};
         StringBuilder d = new StringBuilder();
         for (int i = 0; i < keys.length; i++) {
             String v = c.optString(keys[i]);
             if (!v.isEmpty()) d.append(labels[i]).append(": ").append(v).append("\n");
+        }
+        if (Cal.sched(c) != null || !c.optString("days").isEmpty() || !c.optString("time").isEmpty()) {
+            d.append("روزها و ساعت: ").append(Cal.scheduleText(c)).append("\n");
         }
         if (d.length() > 0) text(d.toString().trim(), 15);
         JSONArray m = c.optJSONArray("students");
@@ -506,24 +512,182 @@ public class MainActivity extends Activity {
                 }).setNegativeButton("لغو", null).show();
     }
 
+    /** A Jalali date chosen as day / month / year (three drop-downs); stored as yyyy/MM/dd. */
+    final class DateField {
+        final Spinner d, m, y;
+        final LinearLayout row;
+        final List<Integer> years = new ArrayList<>();
+
+        DateField(String cur) {
+            int cy = Cal.jal(JalaliDate.today())[0];
+            int cd = 0, cm = 0, cyr = 0;
+            long e = cur == null || cur.trim().isEmpty() ? JalaliDate.INVALID : Cal.parse(cur);
+            if (e != JalaliDate.INVALID) {
+                int[] j = Cal.jal(e);
+                cyr = j[0];
+                cm = j[1];
+                cd = j[2];
+            }
+            for (int v = cy - 2; v <= cy + 3; v++) years.add(v);
+            if (cyr != 0 && !years.contains(cyr)) {
+                years.add(cyr);
+                Collections.sort(years);
+            }
+            List<String> dl = new ArrayList<>(), ml = new ArrayList<>(), yl = new ArrayList<>();
+            dl.add("روز");
+            for (int v = 1; v <= 31; v++) dl.add(String.valueOf(v));
+            ml.add("ماه");
+            for (String mn : Cal.MONTHS) ml.add(mn);
+            yl.add("سال");
+            for (int v : years) yl.add(String.valueOf(v));
+            d = spinner(dl, cd);
+            m = spinner(ml, cm);
+            y = spinner(yl, cyr == 0 ? 0 : years.indexOf(cyr) + 1);
+            row = new LinearLayout(MainActivity.this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+            row.addView(d, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            row.addView(m, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.3f));
+            row.addView(y, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.1f));
+        }
+
+        /** "" when nothing is chosen, null when incomplete or impossible (e.g. 31 Mehr), else "yyyy/MM/dd". */
+        String value() {
+            int dd = d.getSelectedItemPosition(), mm = m.getSelectedItemPosition(), yy = y.getSelectedItemPosition();
+            if (dd == 0 && mm == 0 && yy == 0) return "";
+            if (dd == 0 || mm == 0 || yy == 0) return null;
+            int year = years.get(yy - 1);
+            if (dd > Cal.monthLen(year, mm)) return null;
+            return JalaliDate.fmt(year, mm, dd);
+        }
+    }
+
+    Spinner spinner(List<String> items, int sel) {
+        Spinner sp = new Spinner(this);
+        ArrayAdapter<String> ad = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, items);
+        ad.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        sp.setAdapter(ad);
+        sp.setSelection(Math.max(0, Math.min(sel, items.size() - 1)));
+        return sp;
+    }
+
+    TextView smallLabel(String s) {
+        TextView t = new TextView(this);
+        t.setText(s);
+        t.setTextSize(13);
+        t.setTextColor(Color.rgb(100, 108, 130));
+        t.setPadding(dp(4), dp(10), dp(4), dp(2));
+        return t;
+    }
+
     void classDialog(final int idx) {
         final JSONObject o = idx >= 0 ? st.classes.optJSONObject(idx) : new JSONObject();
         if (o == null) return;
-        final String[] keys = {"name", "level", "start", "end", "days", "time", "notes"};
-        String[] hints = {"نام کلاس", "سطح/دوره", "تاریخ شروع", "تاریخ پایان", "روزهای برگزاری", "ساعت", "توضیحات"};
-        final EditText[] es = new EditText[keys.length];
+        final EditText name = edit("نام کلاس", o.optString("name"), false);
+        final EditText level = edit("سطح/دوره", o.optString("level"), false);
+        final EditText notes = edit("توضیحات", o.optString("notes"), true);
+        final DateField start = new DateField(o.optString("start")), end = new DateField(o.optString("end"));
+        // one start and end hour for every meeting day (older classes: days / time text turned into this table)
+        JSONObject sc0 = Cal.sched(o) != null ? Cal.sched(o) : Cal.legacySched(o);
+        final CheckBox[] on = new CheckBox[7];
+        final String[] ss = new String[7], ee = new String[7];
+        final Button[] sb = new Button[7], eb = new Button[7];
         LinearLayout l = form();
-        for (int i = 0; i < keys.length; i++) {
-            es[i] = edit(hints[i], o.optString(keys[i]), i == 6);
-            l.addView(es[i]);
+        l.addView(name);
+        l.addView(level);
+        l.addView(smallLabel("تاریخ شروع کلاس (روز / ماه / سال)"));
+        l.addView(start.row);
+        l.addView(smallLabel("تاریخ پایان کلاس (روز / ماه / سال)"));
+        l.addView(end.row);
+        l.addView(smallLabel("روزهای تشکیل کلاس و ساعت شروع و پایان هر روز"));
+        for (int i = 0; i < 7; i++) {
+            final int di = i;
+            JSONObject d = sc0.optJSONObject(String.valueOf(i));
+            ss[i] = d == null ? "" : d.optString("s");
+            ee[i] = d == null ? "" : d.optString("e");
+            LinearLayout r = new LinearLayout(this);
+            r.setOrientation(LinearLayout.HORIZONTAL);
+            r.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+            r.setGravity(Gravity.CENTER_VERTICAL);
+            on[i] = new CheckBox(this);
+            on[i].setText(Cal.DAYS[i]);
+            on[i].setChecked(d != null);
+            sb[i] = new Button(this);
+            eb[i] = new Button(this);
+            for (Button b : new Button[]{sb[i], eb[i]}) {
+                b.setAllCaps(false);
+                b.setTextSize(13);
+            }
+            sb[i].setText("شروع: " + (ss[i].isEmpty() ? "--:--" : ss[i]));
+            eb[i].setText("پایان: " + (ee[i].isEmpty() ? "--:--" : ee[i]));
+            sb[i].setOnClickListener(x -> pickTime(ss[di], t -> {
+                ss[di] = t;
+                on[di].setChecked(true);
+                sb[di].setText("شروع: " + t);
+            }));
+            eb[i].setOnClickListener(x -> pickTime(ee[di], t -> {
+                ee[di] = t;
+                on[di].setChecked(true);
+                eb[di].setText("پایان: " + t);
+            }));
+            on[i].setOnCheckedChangeListener((v, checked) -> {
+                if (checked && ss[di].isEmpty() && ee[di].isEmpty()) { // a new day starts with the hours of the previous chosen day
+                    for (int k = 0; k < 7; k++) {
+                        if (k != di && on[k].isChecked() && !(ss[k].isEmpty() && ee[k].isEmpty())) {
+                            ss[di] = ss[k];
+                            ee[di] = ee[k];
+                            sb[di].setText("شروع: " + (ss[di].isEmpty() ? "--:--" : ss[di]));
+                            eb[di].setText("پایان: " + (ee[di].isEmpty() ? "--:--" : ee[di]));
+                            break;
+                        }
+                    }
+                }
+            });
+            r.addView(on[i], new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.1f));
+            r.addView(sb[i], new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            r.addView(eb[i], new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            l.addView(r);
         }
+        l.addView(notes);
         formDialog(idx >= 0 ? "ویرایش کلاس" : "افزودن کلاس", l, () -> {
-            if (es[0].getText().toString().trim().isEmpty()) {
+            if (name.getText().toString().trim().isEmpty()) {
                 toast("نام کلاس الزامی است");
                 return false;
             }
+            String sv = start.value(), ev = end.value();
+            if (sv == null || ev == null) {
+                toast("تاریخ را کامل و درست انتخاب کنید (روز، ماه و سال) یا هر سه را خالی بگذارید");
+                return false;
+            }
+            if (!sv.isEmpty() && !ev.isEmpty() && Cal.parse(ev) < Cal.parse(sv)) {
+                toast("تاریخ پایان قبل از تاریخ شروع است");
+                return false;
+            }
             try {
-                for (int k = 0; k < keys.length; k++) o.put(keys[k], es[k].getText().toString().trim());
+                JSONObject sched = new JSONObject();
+                List<String> dn = new ArrayList<>();
+                String common = null;
+                boolean same = true;
+                for (int i = 0; i < 7; i++) {
+                    if (!on[i].isChecked()) continue;
+                    sched.put(String.valueOf(i), new JSONObject().put("s", ss[i]).put("e", ee[i]));
+                    dn.add(Cal.DAYS[i]);
+                    String sp = Cal.span(ss[i], ee[i]);
+                    if (common == null) common = sp;
+                    else if (!common.equals(sp)) same = false;
+                }
+                o.put("name", name.getText().toString().trim());
+                o.put("level", level.getText().toString().trim());
+                o.put("notes", notes.getText().toString().trim());
+                o.put("start", sv);
+                o.put("end", ev);
+                o.put("sched", sched);
+                // older text fields stay in step (used by Excel export / other readers)
+                StringBuilder dj = new StringBuilder();
+                for (String x : dn) dj.append(dj.length() > 0 ? " و " : "").append(x);
+                o.put("days", dj.toString());
+                o.put("time", same && common != null ? common : "");
+                o.put("ts", System.currentTimeMillis());
                 if (o.optString("code").isEmpty()) o.put("code", st.newCode("C", st.classes));
                 if (o.optJSONArray("students") == null) o.put("students", new JSONArray());
                 if (idx < 0) st.classes.put(o);
@@ -536,6 +700,19 @@ public class MainActivity extends Activity {
             else classesPage();
             return true;
         });
+    }
+
+    interface TimeSet { void on(String hhmm); }
+
+    /** 24-hour time chooser; the current value ("16:30") is the starting point. */
+    void pickTime(String cur, final TimeSet set) {
+        int h = 16, m = 0;
+        long q = Cal.startMin(cur == null ? "" : cur);
+        if (q != Cal.NO_TIME) {
+            h = (int) (q / 60);
+            m = (int) (q % 60);
+        }
+        new TimePickerDialog(this, (view, hh, mm) -> set.on(String.format(Locale.US, "%02d:%02d", hh, mm)), h, m, true).show();
     }
 
     // =====================================================================
@@ -554,6 +731,52 @@ public class MainActivity extends Activity {
         return at > 0 ? JalaliDate.fromMillis(at) : JalaliDate.INVALID;
     }
 
+    private static final String FA_ALPHABET = "ابپتثجچحخدذرزژسشصضطظعغفقکگلمنوهی";
+
+    /** Letter rank for sorting: numbers first, then Latin A-Z, then the Persian alphabet in its own order. */
+    static int rank(char c) {
+        c = Character.toLowerCase(c);
+        if (c >= 'a' && c <= 'z') return 1000 + (c - 'a');
+        switch (c) {
+            case 'آ': case 'أ': case 'إ': case 'ء': c = 'ا'; break;
+            case 'ك': c = 'ک'; break;
+            case 'ي': case 'ى': case 'ئ': c = 'ی'; break;
+            case 'ة': c = 'ه'; break;
+            case 'ؤ': c = 'و'; break;
+            default: break;
+        }
+        int k = FA_ALPHABET.indexOf(c);
+        return k >= 0 ? 2000 + k : 3000 + c;
+    }
+
+    /** Alphabetical order of class names: Latin letters, then Persian letters; numbers inside names compare as numbers (A2 before A10). */
+    static int natCmp(String a, String b) {
+        int i = 0, j = 0;
+        while (i < a.length() && j < b.length()) {
+            char x = a.charAt(i), y = b.charAt(j);
+            boolean dx = Character.isDigit(x), dy = Character.isDigit(y);
+            if (dx && dy) {
+                int i2 = i, j2 = j;
+                while (i2 < a.length() && Character.isDigit(a.charAt(i2))) i2++;
+                while (j2 < b.length() && Character.isDigit(b.charAt(j2))) j2++;
+                String na = Text.digits(a.substring(i, i2)).replaceFirst("^0+(?=.)", ""), nb = Text.digits(b.substring(j, j2)).replaceFirst("^0+(?=.)", "");
+                if (na.length() != nb.length()) return na.length() < nb.length() ? -1 : 1;
+                int r = na.compareTo(nb);
+                if (r != 0) return r;
+                i = i2;
+                j = j2;
+            } else if (dx != dy) {
+                return dx ? -1 : 1;
+            } else {
+                int r = Integer.compare(rank(x), rank(y));
+                if (r != 0) return r;
+                i++;
+                j++;
+            }
+        }
+        return Integer.compare(a.length() - i, b.length() - j);
+    }
+
     void reportsPage() {
         base("گزارش روزانه", this::home);
         btn("📝 ساخت گزارش با فرم (تیک‌دار)", x -> reportForm(-1, "", JalaliDate.todayJalali(), "", new ReportForm()));
@@ -565,7 +788,7 @@ public class MainActivity extends Activity {
         final ArrayList<Integer> order = new ArrayList<>();
         for (int i = 0; i < st.reports.length(); i++) order.add(i);
         Collections.sort(order, (a, b) -> Long.compare(reportDay(st.reports.optJSONObject(b)), reportDay(st.reports.optJSONObject(a))));
-        // grouped by class (class list order, then other classes, then reports without a class); newest first inside a group
+        // grouped by class, in alphabetical order of the class names (reports without a class last); newest first inside a group
         final Map<String, List<Integer>> groups = new LinkedHashMap<>();
         final Map<String, String> names = new LinkedHashMap<>();
         for (int c = 0; c < st.classes.length(); c++) {
@@ -583,13 +806,17 @@ public class MainActivity extends Activity {
             groups.get(key).add(i);
         }
         List<String> keys = new ArrayList<>(groups.keySet());
-        if (keys.remove("")) keys.add("");
+        keys.remove("");
+        Collections.sort(keys, (x, y) -> natCmp(names.get(x), names.get(y)));
+        if (groups.containsKey("")) keys.add("");
         for (String key : keys) {
             final List<Integer> g = groups.get(key);
             if (g.isEmpty()) continue;
+            final String gkey = key;
             final String title = (key.isEmpty() ? "بدون کلاس" : "🏫 " + names.get(key)) + " — " + g.size() + " گزارش";
             final TextView head = new TextView(this);
-            head.setText(title + "  ▾");
+            final boolean startOpen = openGroups.contains(gkey);
+            head.setText(title + (startOpen ? "  ▾" : "  ◂"));
             head.setTextSize(17);
             head.setTextColor(Color.rgb(30, 50, 90));
             head.setBackgroundColor(Color.rgb(214, 222, 240));
@@ -600,8 +827,11 @@ public class MainActivity extends Activity {
             final LinearLayout box = new LinearLayout(this);
             box.setOrientation(LinearLayout.VERTICAL);
             root.addView(box, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            box.setVisibility(startOpen ? View.VISIBLE : View.GONE);
             head.setOnClickListener(x -> {
                 boolean open = box.getVisibility() != View.GONE;
+                if (open) openGroups.remove(gkey);
+                else openGroups.add(gkey);
                 box.setVisibility(open ? View.GONE : View.VISIBLE);
                 head.setText(title + (open ? "  ◂" : "  ▾"));
             });
@@ -1749,14 +1979,92 @@ public class MainActivity extends Activity {
         base("تنظیمات", this::home);
         btn("👩‍🏫 معلم‌ها", x -> listEditor("معلم‌ها", "نام هر معلم در یک خط", st.teachers(), 0));
         btn("☑️ توضیحات آماده وضعیت بچه‌ها (تا ۸ مورد)", x -> listEditor("توضیحات آماده", "هر توضیح در یک خط (حداکثر ۸ مورد)", st.options(), Store.MAX_OPTIONS));
-        btn(st.manager() ? "👔 حالت مدیر: روشن (برای خاموش کردن بزنید)" : "👔 حالت مدیر: خاموش (برای روشن کردن بزنید)", x -> {
-            st.setManager(!st.manager());
-            settings();
-        });
+        if (st.manager()) {
+            btn("👔 حالت مدیر: روشن (برای خاموش کردن بزنید)", x -> {
+                st.setManager(false);
+                settings();
+            });
+            btn(st.hasManagerPassword() ? "🔑 تغییر رمز ۴ رقمی و پیام یادآوری" : "🔑 ساخت رمز ۴ رقمی برای حالت مدیر", x -> passwordDialog(st.hasManagerPassword()));
+        } else {
+            btn("👔 حالت مدیر: خاموش (برای روشن کردن بزنید)", x -> {
+                if (st.hasManagerPassword()) enterPasswordDialog();
+                else passwordDialog(false);
+            });
+        }
         btn("💾 پشتیبان‌گیری از داده‌ها", x -> backup());
         btn("♻️ بازیابی / ادغام پشتیبان", x -> pick(PICK_BACKUP));
         btn("ℹ️ درباره برنامه", x -> info("کلاس 1.9", "عامل سبک مدیریت آموزشگاه زبان\nAndroid اول، iOS در مرحله بعد\nداده‌ها روی خود گوشی نگهداری می‌شوند."));
         backBtn();
+    }
+
+    EditText pinEdit(String hint) {
+        EditText e = edit(hint, "", false);
+        e.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
+        e.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(4)});
+        return e;
+    }
+
+    /** Turning manager mode on: asks the 4-digit password; the manager's own reminder message helps if it is forgotten. */
+    void enterPasswordDialog() {
+        final EditText pw = pinEdit("رمز ۴ رقمی");
+        LinearLayout l = form();
+        l.addView(pw);
+        final AlertDialog d = new AlertDialog.Builder(this).setTitle("ورود به حالت مدیر").setView(scroll(l))
+                .setPositiveButton("ورود", null).setNeutralButton("یادآوری رمز", null).setNegativeButton("لغو", null).create();
+        d.show();
+        d.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            if (st.checkManagerPassword(pw.getText().toString())) {
+                st.setManager(true);
+                d.dismiss();
+                settings();
+            } else {
+                toast("رمز درست نیست");
+                pw.setText("");
+            }
+        });
+        d.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
+            String h = st.managerHint();
+            info("یادآوری رمز", h.isEmpty() ? "پیام یادآوری ثبت نشده است." : h);
+        });
+    }
+
+    /** Creating (change == false) or changing (change == true) the 4-digit password and the reminder message. */
+    void passwordDialog(final boolean change) {
+        final EditText cur = pinEdit("رمز فعلی");
+        final EditText p1 = pinEdit("رمز جدید (۴ رقم)");
+        final EditText p2 = pinEdit("تکرار رمز");
+        final EditText hint = edit("پیام یادآوری (اختیاری؛ فقط برای خودتان، خود رمز را ننویسید)", st.managerHint(), true);
+        hint.setMinLines(2);
+        LinearLayout l = form();
+        if (change) l.addView(cur);
+        l.addView(p1);
+        l.addView(p2);
+        l.addView(hint);
+        formDialog(change ? "تغییر رمز حالت مدیر" : "ساخت رمز حالت مدیر", l, () -> {
+            if (change && !st.checkManagerPassword(cur.getText().toString())) {
+                toast("رمز فعلی درست نیست");
+                return false;
+            }
+            String a = Store.pin(p1.getText().toString());
+            if (a == null) {
+                toast("رمز باید دقیقاً ۴ رقم باشد");
+                return false;
+            }
+            if (!a.equals(Store.pin(p2.getText().toString()))) {
+                toast("تکرار رمز با رمز یکی نیست");
+                return false;
+            }
+            String h = hint.getText().toString().trim();
+            if (!h.isEmpty() && Text.digits(h).contains(a)) {
+                toast("پیام یادآوری نباید خود رمز را داشته باشد");
+                return false;
+            }
+            st.setManagerPassword(a, h);
+            st.setManager(true);
+            toast("رمز ذخیره شد");
+            settings();
+            return true;
+        });
     }
 
     /** One item per line; max == 0 means unlimited. Teachers and remark options share this editor. */

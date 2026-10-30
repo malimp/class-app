@@ -197,6 +197,51 @@ final class Store {
         sp.edit().putBoolean("manager", on).apply();
     }
 
+    // ---------- manager password (4 digits; stored only as a salted hash on this device, never in any backup) ----------
+
+    private static String sha(String s) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] h = md.digest(s.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder b = new StringBuilder();
+            for (byte x : h) b.append(String.format(java.util.Locale.US, "%02x", x & 0xff));
+            return b.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            return s;
+        }
+    }
+
+    /** Four digits in any digit script, else null. */
+    static String pin(String raw) {
+        String d = Text.digits(raw == null ? "" : raw.trim());
+        return d.matches("\\d{4}") ? d : null;
+    }
+
+    boolean hasManagerPassword() {
+        return !sp.getString("mgr_hash", "").isEmpty();
+    }
+
+    boolean checkManagerPassword(String raw) {
+        String p = pin(raw);
+        return p != null && sha(sp.getString("mgr_salt", "") + p).equals(sp.getString("mgr_hash", ""));
+    }
+
+    /** raw must be a valid 4-digit pin (see pin()); hint = the reminder message the manager wrote for himself. */
+    void setManagerPassword(String raw, String hint) {
+        String p = pin(raw);
+        if (p == null) return;
+        String salt = Long.toHexString(System.nanoTime()) + Long.toHexString(System.currentTimeMillis());
+        sp.edit().putString("mgr_salt", salt).putString("mgr_hash", sha(salt + p)).putString("mgr_hint", hint == null ? "" : hint.trim()).apply();
+    }
+
+    String managerHint() {
+        return sp.getString("mgr_hint", "");
+    }
+
+    void setManagerHint(String hint) {
+        sp.edit().putString("mgr_hint", hint == null ? "" : hint.trim()).apply();
+    }
+
     // ---------- calendar events ----------
 
     /** Adds or replaces (same id) an event; stamps it with the edit time. */

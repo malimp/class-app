@@ -231,11 +231,78 @@ final class Cal {
         return NO_TIME;
     }
 
+    // ---------- per-day schedule: sched = {"0": {"s": "16:00", "e": "17:30"}, ...}, key = weekday (Saturday = 0) ----------
+
+    /** The class's own schedule (one start and end hour for every meeting day), or null for older classes (days / time text). */
+    static JSONObject sched(JSONObject c) {
+        JSONObject s = c.optJSONObject("sched");
+        return s != null && s.length() > 0 ? s : null;
+    }
+
+    static String span(String s, String e) {
+        s = s == null ? "" : s.trim();
+        e = e == null ? "" : e.trim();
+        if (s.isEmpty()) return e;
+        return e.isEmpty() ? s : s + " تا " + e;
+    }
+
+    /** The class hours of day e ("16:00 تا 17:30"); for older classes the single time text. */
+    static String timeAt(JSONObject c, long e) {
+        JSONObject sc = sched(c);
+        if (sc == null) return c.optString("time");
+        JSONObject d = sc.optJSONObject(String.valueOf(wd(e)));
+        return d == null ? "" : span(d.optString("s"), d.optString("e"));
+    }
+
+    /** «شنبه 16:00 تا 17:30، دوشنبه 18:00 تا 19:30». */
+    static String scheduleText(JSONObject c) {
+        JSONObject sc = sched(c);
+        if (sc == null) {
+            String d = c.optString("days"), t = c.optString("time");
+            return (d.isEmpty() ? "—" : d) + (t.isEmpty() ? "" : " • ساعت " + t);
+        }
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < 7; i++) {
+            JSONObject d = sc.optJSONObject(String.valueOf(i));
+            if (d == null) continue;
+            if (b.length() > 0) b.append("، ");
+            b.append(DAYS[i]);
+            String sp = span(d.optString("s"), d.optString("e"));
+            if (!sp.isEmpty()) b.append(" ").append(sp);
+        }
+        return b.length() == 0 ? "—" : b.toString();
+    }
+
+    private static String hm(Matcher m) {
+        return String.format(java.util.Locale.US, "%02d:%02d", Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2)));
+    }
+
+    /** The schedule an older class (days + time text) would have: used to prefill the editor. */
+    static JSONObject legacySched(JSONObject c) {
+        JSONObject out = new JSONObject();
+        boolean[] d = parseDays(c.optString("days"));
+        Matcher m = HM.matcher(Text.norm(c.optString("time")));
+        String s = "", e = "";
+        if (m.find() && Integer.parseInt(m.group(1)) < 24) s = hm(m);
+        if (m.find() && Integer.parseInt(m.group(1)) < 24) e = hm(m);
+        for (int i = 0; i < 7; i++) {
+            if (!d[i]) continue;
+            try {
+                out.put(String.valueOf(i), new JSONObject().put("s", s).put("e", e));
+            } catch (org.json.JSONException ignored) {
+                // keys are valid
+            }
+        }
+        return out;
+    }
+
     static boolean classDay(JSONObject c, long e) {
         long s = parse(c.optString("start"));
         long en = parse(c.optString("end"));
         if (s != JalaliDate.INVALID && e < s) return false;
         if (en != JalaliDate.INVALID && e > en) return false;
+        JSONObject sc = sched(c);
+        if (sc != null) return sc.optJSONObject(String.valueOf(wd(e))) != null;
         return parseDays(c.optString("days"))[wd(e)];
     }
 
@@ -333,12 +400,16 @@ final class Cal {
             }
             if (it == null) continue;
             it.cls = name;
-            it.time = c.optString("time");
+            it.time = timeAt(c, e);
             it.sort = startMin(it.time);
             if (!"cancelled".equals(it.kind) && withNumbers) it.num = number(c, events, e);
             if ("makeup".equals(it.kind)) {
                 for (JSONObject o : eventsOn(events, e)) {
                     if (MAKEUP.equals(o.optString("type")) && Text.norm(o.optString("cls")).equals(Text.norm(name))) it.ev = o;
+                }
+                if (it.ev != null && !it.ev.optString("time").trim().isEmpty()) { // the makeup session has its own hour
+                    it.time = it.ev.optString("time").trim();
+                    it.sort = startMin(it.time);
                 }
             }
             d.items.add(it);
@@ -478,9 +549,10 @@ final class Cal {
         if (s == JalaliDate.INVALID) s = JalaliDate.today();
         if (en == JalaliDate.INVALID) en = s + 120;
         StringBuilder b = new StringBuilder("برنامه جلسات کلاس " + c.optString("name") + "\n");
-        if (!c.optString("time").isEmpty()) b.append("ساعت: ").append(c.optString("time")).append("\n");
+        b.append("روزها و ساعت: ").append(scheduleText(c)).append("\n");
         for (long[] x : sessions(c, events, s, en)) {
-            b.append("\nجلسه ").append(x[1]).append(" — ").append(dayHeader(x[0])).append("\n");
+            String tm = timeAt(c, x[0]);
+            b.append("\nجلسه ").append(x[1]).append(" — ").append(dayHeader(x[0])).append(tm.isEmpty() ? "" : " — ساعت " + tm).append("\n");
             JSONObject l = lesson(events, c.optString("name"), fmt(x[0]));
             if (l != null && !l.optString("note").trim().isEmpty()) b.append("   ").append(l.optString("note").trim()).append("\n");
         }
