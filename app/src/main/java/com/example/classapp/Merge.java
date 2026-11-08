@@ -17,13 +17,14 @@ final class Merge {
     private Merge() {}
 
     static final class Result {
-        int students, classes, reports, duplicateReports, members, notes, events, eventsUpdated;
+        int students, classes, reports, duplicateReports, members, notes, events, eventsUpdated, grades, gradesUpdated;
 
         String summary() {
             return "زبان‌آموز جدید: " + students + "\nکلاس جدید: " + classes + "\nعضو جدید در کلاس‌ها: " + members
                     + "\nگزارش جدید: " + reports + "\nگزارش تکراری (نادیده گرفته شد): " + duplicateReports
                     + "\nیادداشت جدید: " + notes + "\nرویداد و برنامه درسی جدید: " + events
-                    + "\nرویداد و برنامه درسی به‌روز شده (نسخه جدیدتر): " + eventsUpdated;
+                    + "\nرویداد و برنامه درسی به‌روز شده (نسخه جدیدتر): " + eventsUpdated
+                    + "\nنمرهٔ جدید: " + grades + "\nنمرهٔ به‌روز شده: " + gradesUpdated;
         }
     }
 
@@ -88,7 +89,7 @@ final class Merge {
             // the manager's newer edit of the class (dates, days and hours) reaches the other phones
             JSONObject lc = st.classes.optJSONObject(ci);
             if (lc != null && c.optLong("ts", 0) > lc.optLong("ts", 0)) {
-                for (String k : new String[]{"level", "start", "end", "days", "time", "notes", "sched"}) {
+                for (String k : new String[]{"level", "start", "end", "days", "time", "notes", "sched", "cap"}) {
                     if (c.has(k)) lc.put(k, c.opt(k));
                 }
                 lc.put("ts", c.optLong("ts", 0));
@@ -148,6 +149,26 @@ final class Merge {
             } else if (e.optLong("ts", 0) > st.events.optJSONObject(at).optLong("ts", 0)) {
                 st.events.put(at, new JSONObject(e.toString()));
                 res.eventsUpdated++;
+            }
+        }
+        // skill grades: by id, a newer edit (ts) wins; the student code is translated to the local one
+        JSONArray ing = in.optJSONArray("grades");
+        for (int i = 0; ing != null && i < ing.length(); i++) {
+            JSONObject g = ing.optJSONObject(i);
+            if (g == null || g.optString("id").isEmpty()) continue;
+            JSONObject copy = new JSONObject(g.toString());
+            String local = map.get(copy.optString("code"));
+            if (local != null) copy.put("code", local);
+            int at = -1;
+            for (int k = 0; k < st.grades.length() && at < 0; k++) {
+                if (copy.optString("id").equals(st.grades.optJSONObject(k).optString("id"))) at = k;
+            }
+            if (at < 0) {
+                st.grades.put(copy);
+                res.grades++;
+            } else if (copy.optLong("ts", 0) > st.grades.optJSONObject(at).optLong("ts", 0)) {
+                st.grades.put(at, copy);
+                res.gradesUpdated++;
             }
         }
         // settings: union of teachers; options only when this phone has none of its own

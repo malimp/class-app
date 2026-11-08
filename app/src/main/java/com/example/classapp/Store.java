@@ -16,7 +16,7 @@ import java.util.Set;
 
 /** All app data (students, classes, reports, manual notes), persisted as JSON in SharedPreferences. */
 final class Store {
-    static final int VERSION = 7;
+    static final int VERSION = 8;
     static final int MAX_OPTIONS = 8;
     static final String[] DEFAULT_TEACHERS = {"Asal", "Asha"};
     static final String[] DEFAULT_OPTIONS = {
@@ -24,22 +24,37 @@ final class Store {
             "معنی با ارفاق پذیرفته شد", "تمرینات انجام نداده بودند", "تمرینات ناقص انجام شده بود"};
 
     private final SharedPreferences sp;
-    JSONArray students, classes, reports, events;
+    private final Context ctx;
+    JSONArray students, classes, reports, events, grades;
     JSONObject notes, settings;
     /** Finance data: separate from the normal backup (never merged into / exported with it). */
     JSONObject fin;
+    /**
+     * True when a stored section could not be parsed. The data is then left exactly as it was saved — no
+     * normalisation, no rewrite — and the raw text is copied to the auto-backup folder, because an empty
+     * in-memory list must never be saved over the user's real data.
+     */
+    boolean corrupt;
 
     Store(Context c) {
+        ctx = c;
         sp = c.getSharedPreferences("class_data", 0);
-        students = clean(arr("students"));
-        classes = clean(arr("classes"));
-        reports = clean(arr("reports"));
-        notes = obj("notes");
-        settings = obj("settings");
-        events = clean(arr("events"));
-        fin = Fin.fix(obj("fin"));
-        normalize();
-        migrateOldNotes();
+        boolean[] bad = new boolean[1];
+        students = clean(readArr("students", bad));
+        classes = clean(readArr("classes", bad));
+        reports = clean(readArr("reports", bad));
+        events = clean(readArr("events", bad));
+        grades = clean(readArr("grades", bad));
+        notes = readObj("notes", bad);
+        settings = readObj("settings", bad);
+        fin = Fin.fix(readObj("fin", bad));
+        corrupt = bad[0];
+        if (corrupt) {
+            quarantine();
+        } else {
+            normalize();
+            migrateOldNotes();
+        }
     }
 
     // ---------- persistence ----------
@@ -47,22 +62,44 @@ final class Store {
     void save() {
         sp.edit().putString("students", students.toString()).putString("classes", classes.toString())
                 .putString("reports", reports.toString()).putString("notes", notes.toString()).putString("settings", settings.toString())
-                .putString("events", events.toString()).putString("fin", fin.toString()).apply();
+                .putString("events", events.toString()).putString("grades", grades.toString()).putString("fin", fin.toString()).apply();
     }
 
-    private JSONArray arr(String k) {
+    /** Reads a stored array; a missing key is an empty list, a parse error marks the section as corrupt. */
+    private JSONArray readArr(String k, boolean[] bad) {
+        String raw = sp.getString(k, null);
+        if (raw == null) return new JSONArray();
         try {
-            return new JSONArray(sp.getString(k, "[]"));
+            return new JSONArray(raw);
         } catch (Exception e) {
+            bad[0] = true;
+            sp.edit().putString(k + "_corrupt", raw).apply();
             return new JSONArray();
         }
     }
 
-    private JSONObject obj(String k) {
+    /** Reads a stored object; same rules as {@link #readArr}. */
+    private JSONObject readObj(String k, boolean[] bad) {
+        String raw = sp.getString(k, null);
+        if (raw == null) return new JSONObject();
         try {
-            return new JSONObject(sp.getString(k, "{}"));
+            return new JSONObject(raw);
         } catch (Exception e) {
+            bad[0] = true;
+            sp.edit().putString(k + "_corrupt", raw).apply();
             return new JSONObject();
+        }
+    }
+
+    /** Copies every stored section verbatim into the auto-backup folder, so a corrupted start is still recoverable. */
+    private void quarantine() {
+        try {
+            JSONObject all = new JSONObject();
+            String[] keys = {"students", "classes", "reports", "notes", "settings", "events", "fin"};
+            for (String k : keys) all.put(k, sp.getString(k, ""));
+            Backup.raw(ctx, all.toString());
+        } catch (Exception ignored) {
+            // best effort only: the copy must never break the start of the app
         }
     }
 
@@ -164,6 +201,24 @@ final class Store {
         } catch (JSONException ignored) {
             // skip
         }
+    }
+
+    static final String[] DEFAULT_MESSAGES = {
+            "یادآوری شهریه|سلام {نام} عزیز،\nماندهٔ شهریهٔ شما {مانده} تومان است. لطفاً در اولین فرصت اقدام فرمایید.\nبا تشکر",
+            "تشکر از پرداخت|سلام {نام} عزیز،\nپرداخت شما دریافت شد. با تشکر از همراهی شما.",
+            "اطلاع حضور|سلام {نام} عزیز،\nدر جلسهٔ اخیر کلاس {کلاس} غیبت ثبت شده است. لطفاً در صورت امکان هماهنگ کنید."
+    };
+
+    /** Prepared parent messages, each "title|text" with {نام} {کلاس} {مانده} placeholders. */
+    List<String> messages() {
+        if (!settings.has("msgs")) return new ArrayList<>(Arrays.asList(DEFAULT_MESSAGES));
+        List<String> l = strings(settings.optJSONArray("msgs"));
+        return l.isEmpty() ? new ArrayList<>(Arrays.asList(DEFAULT_MESSAGES)) : l;
+    }
+
+    void setMessages(List<String> v) {
+        putList("msgs", strings(new JSONArray(v)));
+        save();
     }
 
     void setTeachers(List<String> v) {
@@ -415,11 +470,19 @@ final class Store {
         return new JSONObject().put("app", "class").put("version", VERSION)
                 .put("exportedAt", System.currentTimeMillis())
                 .put("students", students).put("classes", classes).put("reports", reports)
-                .put("notes", notes).put("settings", settings).put("events", events).toString(2);
+                .put("notes", notes).put("settings", settings).put("events", events).put("grades", grades).toString(2);
     }
 
-    /** Returns an error message, or null when the backup structure is valid. Older backups (without notes) are valid. */
+    /**
+     * Returns an error message, or null when the backup structure is valid. Older backups (without notes or
+     * events) are valid; a file from another app, or one written by a newer version, is rejected.
+     */
     static String validate(JSONObject r) {
+        String app = r.optString("app", "");
+        if (!app.isEmpty() && !"class".equals(app)) return "این فایل، پشتیبان این برنامه نیست";
+        if (r.has("version") && r.optInt("version", 0) > VERSION) {
+            return "این پشتیبان با نسخهٔ جدیدتری از برنامه ساخته شده است";
+        }
         if (!(r.opt("students") instanceof JSONArray) || !(r.opt("classes") instanceof JSONArray)
                 || !(r.opt("reports") instanceof JSONArray)) {
             return "فایل پشتیبان معتبر نیست";
@@ -436,6 +499,7 @@ final class Store {
         JSONObject sj = r.optJSONObject("settings"); // older backups have none: keep the current settings
         if (sj != null) settings = sj;
         if (r.optJSONArray("events") != null) events = clean(r.optJSONArray("events")); // older backups have none: keep the current events
+        if (r.optJSONArray("grades") != null) grades = clean(r.optJSONArray("grades")); // v7 backups have none: keep the current grades
         normalize();
         save();
     }

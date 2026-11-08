@@ -108,7 +108,7 @@ final class ReportForm {
             s.append("\n");
         }
         String g = general.trim();
-        if (!g.isEmpty()) s.append("یادداشت کلی\n").append(g).append("\n");
+        if (!g.isEmpty()) s.append(g).append("\n");
         return s.toString().replaceAll("\\s+$", "") + "\n";
     }
 

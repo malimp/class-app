@@ -2,6 +2,7 @@ package com.example.classapp;
 
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.net.Uri;
 import android.view.Gravity;
@@ -267,7 +268,7 @@ final class CalUi {
                 int idx = w * 7 + c, day = idx - off + 1;
                 TextView cell = new TextView(a);
                 cell.setGravity(Gravity.CENTER);
-                cell.setTextSize(12);
+                cell.setTextSize(11);
                 cell.setMinHeight(a.dp(62));
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
                 lp.setMargins(a.dp(1), a.dp(1), a.dp(1), a.dp(1));
@@ -277,10 +278,13 @@ final class CalUi {
                 }
                 final long e = first + day - 1;
                 String hol = Cal.holiday(a.st.events, e);
-                int[] cnt = Cal.counts(a.st.classes, a.st.events, e, kc);
                 StringBuilder b = new StringBuilder(String.valueOf(day));
-                if (cnt[0] > 0) b.append("\n").append(cnt[0]).append(" کلاس");
-                if (cnt[1] > 0) b.append("\n📝").append(cnt[1]);
+                int evCount = 0;
+                for (Cal.Item it : Cal.day(a.st.classes, a.st.events, e, kc, false).items) {
+                    if ("event".equals(it.kind)) evCount++;
+                    else b.append("\n").append(it.cls).append("cancelled".equals(it.kind) ? " ✖" : "");
+                }
+                if (evCount > 0) b.append("\n📝").append(evCount);
                 if (mgr() && !Fin.dueLines(a.st, e).isEmpty()) b.append("\n💰");
                 cell.setText(b.toString());
                 boolean red = c == 6 || hol != null;
@@ -290,10 +294,12 @@ final class CalUi {
                 row.addView(cell, lp);
             }
         }
-        TextView note = a.text("🔴 تعطیل (مناسبت‌های قمری با محاسبهٔ تقریبی هستند و ممکن است یک روز اختلاف داشته باشند؛ مدیر می‌تواند تعطیلی را حذف یا اضافه کند) • «N کلاس» = تعداد کلاس‌های همان روز • 📝 = آزمون/رویداد", 12);
+        TextView note = a.text("🔴 تعطیل (مناسبت‌های قمری با محاسبهٔ تقریبی هستند و ممکن است یک روز اختلاف داشته باشند؛ مدیر می‌تواند تعطیلی را حذف یا اضافه کند) • زیر هر روز نام کلاس‌های همان روز آمده است (✖ = جلسهٔ لغوشده) • 📝 = آزمون/رویداد", 12);
         note.setTextColor(Color.rgb(100, 108, 130));
         a.exportButtons("calendar-" + jy + "-" + (jm < 10 ? "0" : "") + jm, () -> Cal.monthText(a.st.classes, a.st.events, jy, jm, kc));
-        a.imageButtons("calendar-" + jy + "-" + (jm < 10 ? "0" : "") + jm, () -> Cal.monthText(a.st.classes, a.st.events, jy, jm, kc));
+        final String imgName = "calendar-" + jy + "-" + (jm < 10 ? "0" : "") + jm;
+        a.btn("🖼 ارسال تصویر صفحهٔ تقویم", x -> a.previewBitmap(monthBitmap(jy, jm), "ارسال", a::shareImagePng));
+        a.btn("💾 ذخیره تصویر صفحهٔ تقویم (PNG)", x -> a.previewBitmap(monthBitmap(jy, jm), "ذخیره", png -> a.savePng(png, imgName + "-" + new java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.US).format(new java.util.Date()) + ".png")));
         boolean any = false;
         for (int d = 1; d <= n; d++) {
             final long e = first + d - 1;
@@ -311,6 +317,17 @@ final class CalUi {
         }
         if (!any) a.text("رویداد یا تعطیلی خاصی در این ماه ثبت نشده است.", 14);
         a.backBtn();
+    }
+
+    Bitmap monthBitmap(int jy, int jm) {
+        try {
+            Bitmap b = MonthImage.render(a, a.st.classes, a.st.events, jy, jm, kc);
+            if (b == null) a.toast("ساخت تصویر ممکن نشد");
+            return b;
+        } catch (Exception | OutOfMemoryError e) {
+            a.toast("ساخت تصویر ممکن نشد");
+            return null;
+        }
     }
 
     void dayPage(final long e) {
@@ -757,6 +774,7 @@ final class CalUi {
         a.btn("✏️ شهریهٔ شخصی و تخفیف", v -> personalFeeDialog(code));
         a.btn("➕ افزودن قسط", v -> installDialog(code));
         a.btn("📨 ارسال یادآوری", v -> sendText(Fin.reminderText(a.st, s)));
+        a.btn("💬 پیام آماده به والدین", v -> messageDialog(code));
         a.exportButtons("statement-" + code, () -> Fin.studentText(a.st, s));
         a.imageButtons("statement-" + code, () -> Fin.studentText(a.st, s));
         a.text("پرداخت‌ها", 16);
@@ -778,8 +796,34 @@ final class CalUi {
         a.backBtn();
     }
 
-    private List<String> studentLabels(List<String> codes) {
-        List<String> out = new ArrayList<>();
+    /** Pick one of the prepared messages and fill in this student's name, class and balance. */
+    private void messageDialog(final String code) {
+        final JSONObject s = a.st.student(code);
+        if (s == null) return;
+        final Fin.Acc acc = Fin.acc(a.st, s);
+        List<String> msgs = a.st.messages();
+        final String[] titles = new String[msgs.size()];
+        for (int i = 0; i < msgs.size(); i++) {
+            String raw = msgs.get(i);
+            int p = raw.indexOf('|');
+            titles[i] = p > 0 ? raw.substring(0, p) : "پیام";
+        }
+        new AlertDialog.Builder(a).setTitle("پیام به والدین").setItems(titles, (d, w) -> {
+            String raw = msgs.get(w);
+            int p = raw.indexOf('|');
+            String t = p >= 0 ? raw.substring(p + 1) : raw;
+            t = t.replace("{نام}", Fin.name(s))
+                    .replace("{کلاس}", acc.cls.isEmpty() ? "—" : acc.cls)
+                    .replace("{مانده}", Fin.toman(Math.max(0, acc.balance)));
+            if (t.trim().isEmpty()) {
+                a.toast("متن پیام خالی است");
+                return;
+            }
+            a.sendText(t, false);
+        }).show();
+    }
+
+    private List<String> studentLabels(List<String> codes) {        List<String> out = new ArrayList<>();
         for (int i = 0; i < a.st.students.length(); i++) {
             JSONObject s = a.st.students.optJSONObject(i);
             codes.add(s.optString("code"));

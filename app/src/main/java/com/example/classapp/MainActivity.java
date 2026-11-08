@@ -53,7 +53,7 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 public class MainActivity extends Activity {
-    static final int PICK_STUDENTS = 10, PICK_CLASSES = 11, PICK_REPORT = 12, PICK_BACKUP = 13, PICK_SAVE_BACKUP = 14, PICK_EXPORT = 15, PICK_IMAGE = 16, PICK_FIN_SAVE = 17, PICK_FIN_RESTORE = 18;
+    static final int PICK_STUDENTS = 10, PICK_CLASSES = 11, PICK_REPORT = 12, PICK_BACKUP = 13, PICK_SAVE_BACKUP = 14, PICK_EXPORT = 15, PICK_IMAGE = 16, PICK_FIN_SAVE = 17, PICK_FIN_RESTORE = 18, PICK_XLSX = 19, PICK_PDF = 20;
     static final int MAX_FILE = 20 * 1024 * 1024;
 
     interface Submit { boolean go(); }
@@ -93,6 +93,7 @@ public class MainActivity extends Activity {
     String fClass = "", fTeacher = ""; // filters of the manager's overall report
     String pendingExport = "";
     byte[] pendingPng;
+    byte[] pendingPdf;
     LinearLayout root;
     Runnable backAction;
 
@@ -100,6 +101,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         st = new Store(this);
+        if (!st.corrupt) Backup.daily(this, st); // one safety copy per day, taken before anything can be changed
         home();
     }
 
@@ -271,8 +273,12 @@ public class MainActivity extends Activity {
 
     /** A dialog whose Save button validates first and stays open (keeping the typed data) when invalid. */
     void formDialog(String title, View content, Submit s) {
+        formDialog(title, content, "ذخیره", s);
+    }
+
+    void formDialog(String title, View content, String okLabel, Submit s) {
         final AlertDialog d = new AlertDialog.Builder(this).setTitle(title).setView(scroll(content))
-                .setPositiveButton("ذخیره", null).setNegativeButton("لغو", null).create();
+                .setPositiveButton(okLabel, null).setNegativeButton("لغو", null).create();
         d.show();
         d.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
             if (s.go()) d.dismiss();
@@ -292,16 +298,405 @@ public class MainActivity extends Activity {
 
     void home() {
         base("کلاس", null);
-        TextView v = text("مدیریت ساده آموزشگاه زبان\nنسخه 1.9 • Android", 16);
+        TextView v = text("مدیریت ساده آموزشگاه زبان\nنسخه 1.15 • Android", 16);
         v.setGravity(Gravity.CENTER);
+        backupNotice();
+        todayDashboard();
         btn("👨‍🎓 زبان‌آموزان", x -> studentsPage());
         btn("🏫 کلاس‌ها", x -> classesPage());
         btn("📝 گزارش روزانه", x -> reportsPage());
+        btn("📝 گزارش‌های جاافتاده", x -> missingReports());
+        btn("🎓 کارنامهٔ مهارتی", x -> gradesPage());
         btn("📆 تقویم آموزشی", x -> cal().month());
         if (st.manager()) btn("💰 مالی", x -> cal().finHome());
         btn("📊 گزارش هفتگی", x -> periodReport(7));
         btn("📅 گزارش ماهانه", x -> periodReport(30));
+        btn("🗓 گزارش از تاریخ تا تاریخ", x -> rangeDialog());
         btn("⚙️ تنظیمات و پشتیبان‌گیری", x -> settings());
+    }
+
+    /** Reminds about a missing or old manual backup, and warns when stored data could not be read. */
+    void backupNotice() {
+        if (st.corrupt) {
+            TextView c = text("⚠️ بخشی از داده‌ها خوانده نشد و دست‌نخورده نگه داشته شد. از «تنظیمات ← نسخه‌های خودکار» یا آخرین فایل پشتیبان بازیابی کنید.", 14);
+            c.setTextColor(Color.rgb(150, 40, 40));
+            btn("🕘 نسخه‌های خودکار", x -> autoBackups());
+        }
+        int d = Backup.daysSinceExport(this);
+        if (d < 0) {
+            TextView n = text("⚠️ هنوز از داده‌ها پشتیبان نگرفته‌اید؛ از تنظیمات یک فایل پشتیبان بگیرید.", 14);
+            n.setTextColor(Color.rgb(120, 85, 0));
+        } else if (d >= Backup.OVERDUE_DAYS) {
+            TextView n = text("⚠️ آخرین پشتیبان " + d + " روز پیش بوده است؛ یک نسخهٔ تازه بگیرید.", 14);
+            n.setTextColor(Color.rgb(120, 85, 0));
+        }
+    }
+
+    // =====================================================================
+    // Today (phase 3, wave 1)
+    // =====================================================================
+
+    /** The morning screen: today's sessions and whether each one has its report yet. */
+    void todayDashboard() {
+        final long today = JalaliDate.today();
+        int[] j = Cal.jal(today);
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackgroundColor(Color.rgb(240, 244, 252));
+        card.setPadding(dp(12), dp(10), dp(12), dp(10));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMargins(0, dp(4), 0, dp(8));
+        root.addView(card, lp);
+
+        TextView head = new TextView(this);
+        head.setText("☀️ امروز — " + Cal.DAYS[Cal.wd(today)] + " " + j[2] + " " + Cal.MONTHS[j[1] - 1]);
+        head.setTextSize(17);
+        card.addView(head);
+
+        Cal.Day day = Cal.day(st.classes, st.events, today, "", false);
+        int shown = 0;
+        for (final Cal.Item it : day.items) {
+            if ("event".equals(it.kind)) continue;
+            shown++;
+            TextView row = new TextView(this);
+            String line = (it.time.isEmpty() ? "" : it.time + " — ") + it.cls;
+            String tail = "cancelled".equals(it.kind) ? "   (برگزار نمی‌شود)"
+                    : hasReport(it.cls, today) ? "   ✅ گزارش ثبت شده" : "   ⏳ بدون گزارش";
+            row.setText(line + tail);
+            row.setTextSize(14);
+            row.setPadding(0, dp(5), 0, dp(5));
+            row.setOnClickListener(x -> cal().dayPage(today));
+            card.addView(row);
+        }
+        if (shown == 0) {
+            TextView n = new TextView(this);
+            n.setText(day.holiday != null ? "🔴 تعطیل: " + day.holiday : "امروز جلسه‌ای نیست.");
+            n.setTextSize(14);
+            card.addView(n);
+        }
+
+        List<Miss> miss = missingRows(7);
+        if (!miss.isEmpty()) {
+            TextView m = new TextView(this);
+            m.setText("📝 " + miss.size() + " جلسهٔ گذشته بدون گزارش");
+            m.setTextSize(14);
+            m.setTextColor(Color.rgb(150, 60, 0));
+            m.setPadding(0, dp(6), 0, 0);
+            m.setOnClickListener(x -> missingReports());
+            card.addView(m);
+        }
+
+        if (st.manager()) {
+            List<String> due = Fin.dueLines(st, today);
+            if (!due.isEmpty()) {
+                TextView d = new TextView(this);
+                d.setText("💰 " + due.size() + " قسط امروز سررسید است");
+                d.setTextSize(14);
+                card.addView(d);
+            }
+            long debt = 0;
+            for (Fin.Acc acc : Fin.debtors(st, "")) debt += acc.balance;
+            if (debt > 0) {
+                TextView d = new TextView(this);
+                d.setText("📉 مجموع بدهی: " + Fin.toman(debt));
+                d.setTextSize(14);
+                card.addView(d);
+            }
+        }
+    }
+
+    boolean hasReport(String cls, long e) {
+        for (int i = 0; i < st.reports.length(); i++) {
+            JSONObject r = st.reports.optJSONObject(i);
+            if (r == null) continue;
+            if (Text.norm(r.optString("class")).equals(Text.norm(cls))
+                    && JalaliDate.parseEpochDay(r.optString("date")) == e) return true;
+        }
+        return false;
+    }
+
+    /** One held session with no report. */
+    static final class Miss {
+        final String cls, date;
+        final long e;
+
+        Miss(String c, String d, long day) {
+            cls = c;
+            date = d;
+            e = day;
+        }
+    }
+
+    /** Sessions of the last `days` days (today excluded) that have no report for that class and date. */
+    List<Miss> missingRows(int days) {
+        List<Miss> out = new ArrayList<>();
+        long today = JalaliDate.today();
+        long from = today - days;
+        for (int i = 0; i < st.classes.length(); i++) {
+            JSONObject c = st.classes.optJSONObject(i);
+            if (c == null) continue;
+            long start = Cal.parse(c.optString("start"));
+            if (start == JalaliDate.INVALID) continue;
+            long end = Cal.parse(c.optString("end"));
+            long to = (end != JalaliDate.INVALID && end < today) ? end : today - 1;
+            long a = Math.max(from, start);
+            if (a > to) continue;
+            for (long[] x : Cal.sessions(c, st.events, a, to)) {
+                if (!hasReport(c.optString("name"), x[0])) out.add(new Miss(c.optString("name"), Cal.fmt(x[0]), x[0]));
+            }
+        }
+        Collections.sort(out, (x, y) -> Long.compare(y.e, x.e));
+        return out;
+    }
+
+    void missingReports() {
+        base("گزارش‌های جاافتاده", this::home);
+        text("جلسه‌هایی که برگزار شده‌اند ولی برای آن کلاس و آن تاریخ گزارشی ثبت نشده است — ۷ روز گذشته.", 13);
+        List<Miss> l = missingRows(7);
+        if (l.isEmpty()) text("همهٔ جلسه‌های ۷ روز گذشته گزارش دارند. 👌", 15);
+        for (final Miss m : l) row2(m.cls, m.date, x -> cal().dayPage(m.e));
+        backBtn();
+    }
+
+    // =====================================================================
+    // Skill report card (phase 3, wave 3)
+    // =====================================================================
+
+    static final String[][] SKILLS = {{"r", "خواندن"}, {"w", "نوشتن"}, {"l", "شنیدن"}, {"s", "صحبت"}};
+
+    List<JSONObject> gradesOf(String code) {
+        List<JSONObject> out = new ArrayList<>();
+        for (int i = 0; i < st.grades.length(); i++) {
+            JSONObject g = st.grades.optJSONObject(i);
+            if (g != null && code.equals(g.optString("code"))) out.add(g);
+        }
+        Collections.sort(out, (a, b) -> Long.compare(JalaliDate.parseEpochDay(b.optString("date")),
+                JalaliDate.parseEpochDay(a.optString("date"))));
+        return out;
+    }
+
+    /** Average of one skill across the records; -1 when nothing was assessed. */
+    int gradeAvg(List<JSONObject> l, String k) {
+        long sum = 0;
+        int n = 0;
+        for (JSONObject g : l) {
+            int v = g.optInt(k, -1);
+            if (v >= 0) {
+                sum += v;
+                n++;
+            }
+        }
+        return n == 0 ? -1 : (int) Math.round((double) sum / n);
+    }
+
+    String gradeLine(JSONObject g) {
+        StringBuilder b = new StringBuilder();
+        for (String[] sk : SKILLS) {
+            int v = g.optInt(sk[0], -1);
+            if (v < 0) continue;
+            if (b.length() > 0) b.append(" • ");
+            b.append(sk[1]).append(" ").append(v);
+        }
+        return b.toString();
+    }
+
+    String gradeSummary(List<JSONObject> l) {
+        StringBuilder b = new StringBuilder();
+        for (String[] sk : SKILLS) {
+            int a = gradeAvg(l, sk[0]);
+            if (a < 0) continue;
+            if (b.length() > 0) b.append(" • ");
+            b.append(sk[1]).append(" ").append(a);
+        }
+        return b.length() == 0 ? "بدون نمره" : b.toString();
+    }
+
+    void gradesPage() {
+        base("کارنامهٔ مهارتی", this::home);
+        text("نمره‌ها از ۰ تا ۱۰۰ برای چهار مهارت. برای ثبت نمره یا دیدن کارنامه روی نام زبان‌آموز بزنید.", 13);
+        if (st.students.length() == 0) text("هنوز زبان‌آموزی ثبت نشده است.", 15);
+        for (int i = 0; i < st.students.length(); i++) {
+            JSONObject s = st.students.optJSONObject(i);
+            if (s == null) continue;
+            final String code = s.optString("code");
+            row2(s.optString("first") + " " + s.optString("last"), gradeSummary(gradesOf(code)), x -> studentGrades(code));
+        }
+        backBtn();
+    }
+
+    void studentGrades(final String code) {
+        final JSONObject s = st.student(code);
+        if (s == null) {
+            gradesPage();
+            return;
+        }
+        base(s.optString("first") + " " + s.optString("last"), this::gradesPage);
+        btn("➕ ثبت نمره", x -> gradeDialog(code, null));
+        List<JSONObject> l = gradesOf(code);
+        if (l.isEmpty()) text("هنوز نمره‌ای ثبت نشده است.", 15);
+        else text("میانگین: " + gradeSummary(l), 15);
+        for (final JSONObject g : l) {
+            String sub = gradeLine(g);
+            if (g.optString("note").length() > 0) sub = sub + (sub.isEmpty() ? "" : "  •  ") + g.optString("note");
+            row2(g.optString("date"), sub, x -> gradeActions(code, g.optString("id")));
+        }
+        exportButtons("grades-" + code, () -> gradeText(code));
+        backBtn();
+    }
+
+    void gradeActions(final String code, final String id) {
+        new AlertDialog.Builder(this).setItems(new String[]{"ویرایش", "حذف"}, (d, w) -> {
+            if (w == 0) gradeDialog(code, id);
+            else confirm("حذف نمره", "این نمره حذف شود؟", "حذف", () -> {
+                for (int i = 0; i < st.grades.length(); i++) {
+                    JSONObject x = st.grades.optJSONObject(i);
+                    if (x != null && id.equals(x.optString("id"))) {
+                        st.grades.remove(i);
+                        break;
+                    }
+                }
+                st.save();
+                studentGrades(code);
+            });
+        }).show();
+    }
+
+    void gradeDialog(final String code, final String id) {
+        JSONObject cur = null;
+        if (id != null) {
+            for (int i = 0; i < st.grades.length() && cur == null; i++) {
+                JSONObject g = st.grades.optJSONObject(i);
+                if (g != null && id.equals(g.optString("id"))) cur = g;
+            }
+        }
+        if (id != null && cur == null) return;
+        final JSONObject g0 = cur;
+        final EditText date = edit("تاریخ (مثلاً 1405/08/17)", g0 != null && !g0.optString("date").isEmpty() ? g0.optString("date") : JalaliDate.todayJalali(), false);
+        final EditText[] es = new EditText[SKILLS.length];
+        LinearLayout l = form();
+        l.addView(date);
+        for (int i = 0; i < SKILLS.length; i++) {
+            boolean has = g0 != null && g0.optInt(SKILLS[i][0], -1) >= 0;
+            es[i] = edit(SKILLS[i][1] + " (۰ تا ۱۰۰؛ خالی = ثبت نشده)", has ? String.valueOf(g0.optInt(SKILLS[i][0], -1)) : "", false);
+            es[i].setInputType(InputType.TYPE_CLASS_NUMBER);
+            l.addView(es[i]);
+        }
+        final EditText note = edit("توضیح (اختیاری)", g0 != null ? g0.optString("note") : "", true);
+        l.addView(note);
+        formDialog(g0 != null ? "ویرایش نمره" : "ثبت نمره", l, () -> {
+            String ds = date.getText().toString().trim();
+            if (ds.isEmpty()) ds = JalaliDate.todayJalali();
+            if (JalaliDate.parseEpochDay(ds) == JalaliDate.INVALID) {
+                toast("تاریخ معتبر نیست (مثلاً 1405/08/17)");
+                return false;
+            }
+            int[] v = new int[SKILLS.length];
+            boolean any = false;
+            for (int i = 0; i < SKILLS.length; i++) {
+                String raw = Text.digits(es[i].getText().toString()).trim();
+                if (raw.isEmpty()) {
+                    v[i] = -1;
+                    continue;
+                }
+                int n;
+                try {
+                    n = Integer.parseInt(raw);
+                } catch (NumberFormatException e) {
+                    n = -1;
+                }
+                if (n < 0 || n > 100) {
+                    toast("نمره‌ها باید بین ۰ تا ۱۰۰ باشند");
+                    return false;
+                }
+                v[i] = n;
+                any = true;
+            }
+            String nt = note.getText().toString().trim();
+            if (!any && nt.isEmpty()) {
+                toast("حداقل یک نمره یا توضیح وارد کنید");
+                return false;
+            }
+            try {
+                JSONObject g = g0 != null ? g0 : new JSONObject();
+                if (g.optString("id").isEmpty()) g.put("id", "G" + System.currentTimeMillis() + "_" + st.grades.length());
+                g.put("code", code).put("date", ds).put("note", nt).put("ts", System.currentTimeMillis());
+                for (int i = 0; i < SKILLS.length; i++) g.put(SKILLS[i][0], v[i]);
+                if (g0 == null) st.grades.put(g);
+                st.save();
+                toast("ذخیره شد");
+                studentGrades(code);
+            } catch (JSONException e) {
+                toast("خطا در ذخیره");
+            }
+            return true;
+        });
+    }
+
+    String gradeText(String code) {
+        JSONObject s = st.student(code);
+        if (s == null) return "";
+        List<JSONObject> l = gradesOf(code);
+        StringBuilder b = new StringBuilder("کارنامهٔ مهارتی — ").append(s.optString("first")).append(" ").append(s.optString("last")).append("\n");
+        String cn = st.classNameOf(code);
+        if (!cn.isEmpty()) b.append("کلاس: ").append(cn).append("\n");
+        b.append("\nتاریخ | خواندن | نوشتن | شنیدن | صحبت\n");
+        for (int i = l.size() - 1; i >= 0; i--) {
+            JSONObject g = l.get(i);
+            b.append(g.optString("date"));
+            for (String[] sk : SKILLS) {
+                int v = g.optInt(sk[0], -1);
+                b.append(" | ").append(v >= 0 ? String.valueOf(v) : "—");
+            }
+            b.append("\n");
+            if (!g.optString("note").isEmpty()) b.append("  (").append(g.optString("note")).append(")\n");
+        }
+        b.append("\nمیانگین: ").append(gradeSummary(l)).append("\n");
+        return b.toString();
+    }
+
+    // =====================================================================
+    // Automatic snapshots (phase 0 of the roadmap)
+    // =====================================================================
+
+    void autoBackups() {
+        base("نسخه‌های خودکار", this::settings);
+        text("برنامه روزی یک‌بار و پیش از هر بازیابی، خودش یک نسخهٔ کامل می‌سازد و ۷ نسخهٔ آخر را نگه می‌دارد. این نسخه‌ها روی همین گوشی هستند؛ برای نگهداری بیرونی از «پشتیبان‌گیری» استفاده کنید.", 13);
+        List<Backup.Snap> l = Backup.list(this);
+        if (l.isEmpty()) text("هنوز نسخه‌ای ساخته نشده است.", 15);
+        for (final Backup.Snap s : l) {
+            row2(Backup.label(s), Backup.size(s), x -> snapshotActions(s));
+        }
+        backBtn();
+    }
+
+    void snapshotActions(final Backup.Snap s) {
+        new AlertDialog.Builder(this).setTitle(Backup.label(s))
+                .setItems(new String[]{"بازیابی این نسخه", "حذف این نسخه"}, (d, w) -> {
+                    if (w == 0) restoreSnapshot(s);
+                    else confirm("حذف نسخه", "این نسخهٔ خودکار حذف شود؟", "حذف", () -> {
+                        s.file.delete();
+                        autoBackups();
+                    });
+                }).show();
+    }
+
+    void restoreSnapshot(final Backup.Snap s) {
+        confirm("بازیابی نسخهٔ خودکار", "داده‌های فعلی با این نسخه عوض می‌شوند. از وضعیت فعلی هم یک نسخه گرفته می‌شود. ادامه؟", "بازیابی", () -> {
+            try {
+                JSONObject r = new JSONObject(Backup.read(s.file));
+                String err = Store.validate(r);
+                if (err != null) {
+                    toast(err);
+                    return;
+                }
+                Backup.take(this, st, "before-restore");
+                st.replaceWith(r);
+                toast("بازیابی انجام شد");
+                home();
+            } catch (Exception e) {
+                toast("این نسخه قابل خواندن نیست");
+            }
+        });
     }
 
     // =====================================================================
@@ -312,6 +707,7 @@ public class MainActivity extends Activity {
         base("زبان‌آموزان", this::home);
         btn("➕ افزودن دستی", x -> studentDialog(-1));
         btn("📥 ورود گروهی Excel (.xlsx)", x -> pick(PICK_STUDENTS));
+        btn("📤 خروجی Excel (.xlsx) از زبان‌آموزان", x -> exportExcel(true));
         btn("🔎 جستجو", x -> searchStudents());
         backBtn();
         text("ستون‌های Excel: کد | نام | نام خانوادگی | موبایل | کد ملی | تاریخ تولد | توضیحات (ردیف اول عنوان است)", 12);
@@ -414,6 +810,7 @@ public class MainActivity extends Activity {
         base("کلاس‌ها", this::home);
         btn("➕ افزودن کلاس", x -> classDialog(-1));
         btn("📥 ورود گروهی Excel (.xlsx)", x -> pick(PICK_CLASSES));
+        btn("📤 خروجی Excel (.xlsx) از کلاس‌ها", x -> exportExcel(false));
         backBtn();
         text("ستون‌های Excel: کد | نام کلاس | سطح | شروع | پایان | روزها | ساعت | توضیحات (ردیف اول عنوان است)", 12);
         text("تعداد کلاس‌ها: " + st.classes.length(), 16);
@@ -434,6 +831,7 @@ public class MainActivity extends Activity {
         base(c.optString("name"), this::classesPage);
         btn("➕ افزودن زبان‌آموز", x -> addMembers(ci));
         btn("✏️ ویرایش کلاس", x -> classDialog(ci));
+        btn("🎓 گواهی پایان دوره", x -> certificatePick(ci));
         btn("🗑️ حذف کلاس", x -> confirm("حذف کلاس", "آیا مطمئن هستید؟ زبان‌آموزان حذف نمی‌شوند و بدون کلاس می‌مانند.", "حذف", () -> {
             st.classes.remove(ci);
             st.save();
@@ -452,11 +850,89 @@ public class MainActivity extends Activity {
         }
         if (d.length() > 0) text(d.toString().trim(), 15);
         JSONArray m = c.optJSONArray("students");
-        text("اعضا: " + (m == null ? 0 : m.length()) + " نفر", 16);
+        text("اعضا: " + (m == null ? 0 : m.length()) + " نفر" + (c.optInt("cap", 0) > 0 ? " از " + c.optInt("cap", 0) : ""), 16);
         if (m == null) return;
         for (int i = 0; i < m.length(); i++) {
             JSONObject s = st.student(m.optString(i));
             if (s != null) memberRow(ci, s);
+        }
+    }
+
+    /** One member of the class -> a printable end-of-course certificate. */
+    void certificatePick(final int ci) {
+        final JSONObject c = st.classes.optJSONObject(ci);
+        if (c == null) return;
+        final JSONArray m = c.optJSONArray("students");
+        if (m == null || m.length() == 0) {
+            toast("این کلاس عضو ندارد");
+            return;
+        }
+        final List<String> names = new ArrayList<>();
+        final List<String> codes = new ArrayList<>();
+        for (int i = 0; i < m.length(); i++) {
+            JSONObject s = st.student(m.optString(i));
+            if (s == null) continue;
+            names.add(s.optString("first") + " " + s.optString("last"));
+            codes.add(s.optString("code"));
+        }
+        if (names.isEmpty()) {
+            toast("عضوی برای این کلاس پیدا نشد");
+            return;
+        }
+        new AlertDialog.Builder(this).setTitle("گواهی پایان دوره")
+                .setItems(names.toArray(new String[0]), (d, w) -> certificateFor(ci, codes.get(w), names.get(w)))
+                .show();
+    }
+
+    void certificateFor(final int ci, final String code, final String name) {
+        final JSONObject c = st.classes.optJSONObject(ci);
+        if (c == null) return;
+        final byte[] pdf;
+        try {
+            pdf = Certificate.pdf(this, name, c.optString("name"), c.optString("level"), JalaliDate.todayJalali());
+        } catch (Exception | OutOfMemoryError e) {
+            toast("ساخت گواهی ممکن نشد");
+            return;
+        }
+        new AlertDialog.Builder(this).setTitle("گواهی پایان دوره")
+                .setMessage(name + "\n" + c.optString("name"))
+                .setPositiveButton("ذخیره PDF", (d, w) -> savePdf(pdf, "certificate-" + name.replace(" ", "-") + ".pdf"))
+                .setNeutralButton("ارسال", (d, w) -> sharePdf(pdf))
+                .setNegativeButton("لغو", null).show();
+    }
+
+    void savePdf(byte[] pdf, String fileName) {
+        pendingPdf = pdf;
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("application/pdf");
+        i.putExtra(Intent.EXTRA_TITLE, fileName);
+        startActivityForResult(i, PICK_PDF);
+    }
+
+    void writePdf(Uri u) throws Exception {
+        try (OutputStream out = getContentResolver().openOutputStream(u, "wt")) {
+            if (out == null || pendingPdf == null) throw new IOException("امکان نوشتن در فایل نیست");
+            out.write(pendingPdf);
+        }
+        toast("گواهی ذخیره شد");
+    }
+
+    void sharePdf(byte[] pdf) {
+        try {
+            File dir = new File(getCacheDir(), "share");
+            if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("cache");
+            String name = "certificate-" + System.currentTimeMillis() + ".pdf";
+            try (FileOutputStream o = new FileOutputStream(new File(dir, name))) {
+                o.write(pdf);
+            }
+            Intent i = new Intent(Intent.ACTION_SEND);
+            i.setType("application/pdf");
+            i.putExtra(Intent.EXTRA_STREAM, Uri.parse("content://" + ShareProvider.AUTHORITY + "/" + name));
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(Intent.createChooser(i, "ارسال گواهی"));
+        } catch (Exception e) {
+            toast("ارسال گواهی ممکن نشد؛ «ذخیره PDF» را امتحان کنید");
         }
     }
 
@@ -484,6 +960,13 @@ public class MainActivity extends Activity {
 
     /** Only students that are not in any class are offered (a student can belong to one class only). */
     void addMembers(final int ci) {
+        final JSONObject cc = st.classes.optJSONObject(ci);
+        final int capN = cc == null ? 0 : cc.optInt("cap", 0);
+        JSONArray cm = cc == null ? null : cc.optJSONArray("students");
+        if (capN > 0 && cm != null && cm.length() >= capN) {
+            toast("ظرفیت این کلاس پر است (" + capN + " نفر)");
+            return;
+        }
         final ArrayList<JSONObject> free = new ArrayList<>();
         for (int i = 0; i < st.students.length(); i++) {
             JSONObject o = st.students.optJSONObject(i);
@@ -504,10 +987,12 @@ public class MainActivity extends Activity {
                 .setPositiveButton("افزودن", (d, w) -> {
                     int added = 0;
                     for (int i = 0; i < chk.length; i++) {
-                        if (chk[i] && st.addToClass(ci, free.get(i).optString("code"))) added++;
+                        if (!chk[i]) continue;
+                        if (capN > 0 && cc.optJSONArray("students") != null && cc.optJSONArray("students").length() >= capN) break;
+                        if (st.addToClass(ci, free.get(i).optString("code"))) added++;
                     }
                     st.save();
-                    toast(added + " نفر به کلاس اضافه شد");
+                    toast(added + " نفر به کلاس اضافه شد" + (capN > 0 && cc.optJSONArray("students") != null && cc.optJSONArray("students").length() >= capN ? " (ظرفیت پر شد)" : ""));
                     classPage(ci);
                 }).setNegativeButton("لغو", null).show();
     }
@@ -585,6 +1070,8 @@ public class MainActivity extends Activity {
         if (o == null) return;
         final EditText name = edit("نام کلاس", o.optString("name"), false);
         final EditText level = edit("سطح/دوره", o.optString("level"), false);
+        final EditText cap = edit("ظرفیت کلاس (اختیاری، ۰ = بدون محدودیت)", o.optInt("cap", 0) > 0 ? String.valueOf(o.optInt("cap", 0)) : "", false);
+        cap.setInputType(InputType.TYPE_CLASS_NUMBER);
         final EditText notes = edit("توضیحات", o.optString("notes"), true);
         final DateField start = new DateField(o.optString("start")), end = new DateField(o.optString("end"));
         // one start and end hour for every meeting day (older classes: days / time text turned into this table)
@@ -595,6 +1082,7 @@ public class MainActivity extends Activity {
         LinearLayout l = form();
         l.addView(name);
         l.addView(level);
+        l.addView(cap);
         l.addView(smallLabel("تاریخ شروع کلاس (روز / ماه / سال)"));
         l.addView(start.row);
         l.addView(smallLabel("تاریخ پایان کلاس (روز / ماه / سال)"));
@@ -678,6 +1166,13 @@ public class MainActivity extends Activity {
                 }
                 o.put("name", name.getText().toString().trim());
                 o.put("level", level.getText().toString().trim());
+                int capN;
+                try {
+                    capN = Integer.parseInt(Text.digits(cap.getText().toString()).trim());
+                } catch (NumberFormatException e) {
+                    capN = 0;
+                }
+                o.put("cap", Math.max(0, capN));
                 o.put("notes", notes.getText().toString().trim());
                 o.put("start", sv);
                 o.put("end", ev);
@@ -1240,8 +1735,50 @@ public class MainActivity extends Activity {
     // Weekly / monthly reports
     // =====================================================================
 
+    /** Custom period (days == 0): both days included, chosen with day / month / year selectors. */
+    long rngFrom, rngTo;
+
+    void rangeDialog() {
+        long t = JalaliDate.today();
+        final DateField f = new DateField(rngFrom != 0 ? Cal.fmt(rngFrom) : Cal.fmt(t - 6)), z = new DateField(rngTo != 0 ? Cal.fmt(rngTo) : Cal.fmt(t));
+        LinearLayout l = form();
+        l.addView(smallLabel("از تاریخ (روز / ماه / سال)"));
+        l.addView(f.row);
+        l.addView(smallLabel("تا تاریخ (روز / ماه / سال) — این روز هم حساب می‌شود"));
+        l.addView(z.row);
+        formDialog("گزارش از تاریخ تا تاریخ", l, "نمایش گزارش", () -> {
+            String a = f.value(), b = z.value();
+            if (a == null || b == null || a.isEmpty() || b.isEmpty()) {
+                toast("هر دو تاریخ را کامل (روز، ماه و سال) انتخاب کنید");
+                return false;
+            }
+            long ea = JalaliDate.parseEpochDay(a), eb = JalaliDate.parseEpochDay(b);
+            if (ea == JalaliDate.INVALID || eb == JalaliDate.INVALID) {
+                toast("تاریخ معتبر نیست");
+                return false;
+            }
+            if (eb < ea) {
+                toast("تاریخ پایان قبل از تاریخ شروع است");
+                return false;
+            }
+            rngFrom = ea;
+            rngTo = eb;
+            periodReport(0);
+            return true;
+        });
+    }
+
+    /** "7" / "30" for the fixed periods, "R<from>-<to>" for a chosen range (the key of the hand-written notes). */
+    String noteKey(int days) {
+        return days == 0 ? "R" + rngFrom + "-" + rngTo : String.valueOf(days);
+    }
+
+    String filePrefix(int days) {
+        return days == 7 ? "weekly" : days == 0 ? "range" : "monthly";
+    }
+
     void periodReport(final int days) {
-        base(days == 7 ? "گزارش هفتگی" : "گزارش ماهانه", this::home);
+        base(periodTitle(days), this::home);
         btn("📌 گزارش کلی کلاس", x -> {
             fClass = "";
             fTeacher = "";
@@ -1249,7 +1786,7 @@ public class MainActivity extends Activity {
         });
         btn("👤 گزارش هر زبان‌آموز", x -> studentPeriod(days));
         btn("🔎 بررسی نام‌های مشابه", x -> ambiguousNames());
-        exportButtons((days == 7 ? "weekly" : "monthly") + "-all-students", () -> allStudentsText(days));
+        exportButtons(filePrefix(days) + "-all-students", () -> allStudentsText(days));
         backBtn();
     }
 
@@ -1269,7 +1806,7 @@ public class MainActivity extends Activity {
                 }
                 p.fallback++;
             }
-            if (d > today - days) p.idx.add(i);
+            if (days == 0 ? (d >= rngFrom && d <= rngTo) : d > today - days) p.idx.add(i);
         }
         Collections.sort(p.idx, (a, b) -> Long.compare(reportDay(st.reports.optJSONObject(a)), reportDay(st.reports.optJSONObject(b))));
         return p;
@@ -1292,6 +1829,7 @@ public class MainActivity extends Activity {
     }
 
     String periodTitle(int days) {
+        if (days == 0) return "گزارش بازه — از " + Cal.fmt(rngFrom) + " تا " + Cal.fmt(rngTo);
         return days == 7 ? "گزارش هفتگی" : "گزارش ماهانه";
     }
 
@@ -1386,7 +1924,7 @@ public class MainActivity extends Activity {
         Period p = period(days);
         StringBuilder s = new StringBuilder(periodTitle(days) + " — گزارش کلی کلاس\n");
         s.append("کلاس: ").append(fClass.isEmpty() ? "همه" : fClass).append("\n");
-        String note = st.note("overallNote" + days);
+        String note = st.note("overallNote" + noteKey(days));
         if (!note.trim().isEmpty()) s.append("\nتوضیحات: ").append(note.trim()).append("\n");
         s.append("\n").append(overallBody(days, p, fClass, fTeacher, false));
         return s.toString();
@@ -1425,8 +1963,8 @@ public class MainActivity extends Activity {
         if (!periodHeader(p, days).isEmpty()) text(periodHeader(p, days), 14);
         filterButton(days, true);
         filterButton(days, false);
-        noteEditor("overallNote" + days);
-        exportButtons("overall-" + (days == 7 ? "weekly" : "monthly"), () -> overallText(days));
+        noteEditor("overallNote" + noteKey(days));
+        exportButtons("overall-" + filePrefix(days), () -> overallText(days));
         backBtn();
         text(overallBody(days, p, fClass, fTeacher, true), 15).setTextIsSelectable(true);
     }
@@ -1483,6 +2021,12 @@ public class MainActivity extends Activity {
             toast("گزارش برای یک تصویر بیش از حد طولانی است؛ از ارسال متنی استفاده کنید");
             return;
         }
+        previewBitmap(b, okLabel, act);
+    }
+
+    /** Shows an already drawn picture; the action runs only after the OK button. A null picture was reported by its maker. */
+    void previewBitmap(final Bitmap b, String okLabel, final PngAction act) {
+        if (b == null) return;
         ImageView iv = new ImageView(this);
         iv.setImageBitmap(b);
         iv.setAdjustViewBounds(true);
@@ -1547,14 +2091,79 @@ public class MainActivity extends Activity {
     }
 
     void saveImage(String text, final String fileName) {
-        previewImage(text, "ذخیره", png -> {
-            pendingPng = png;
-            Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
-            i.addCategory(Intent.CATEGORY_OPENABLE);
-            i.setType("image/png");
-            i.putExtra(Intent.EXTRA_TITLE, fileName);
-            startActivityForResult(i, PICK_IMAGE);
-        });
+        previewImage(text, "ذخیره", png -> savePng(png, fileName));
+    }
+
+    void savePng(byte[] png, String fileName) {
+        pendingPng = png;
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("image/png");
+        i.putExtra(Intent.EXTRA_TITLE, fileName);
+        startActivityForResult(i, PICK_IMAGE);
+    }
+
+    // ---- Excel export (students / classes), same columns as the Excel import plus a few extra ones at the end ----
+    byte[] pendingXlsx;
+
+    void exportExcel(boolean students) {
+        List<String[]> rows = new ArrayList<>();
+        try {
+            if (students) {
+                if (st.students.length() == 0) {
+                    toast("چیزی برای خروجی گرفتن نیست");
+                    return;
+                }
+                rows.add(new String[]{"کد", "نام", "نام خانوادگی", "موبایل", "کد ملی", "تاریخ تولد", "توضیحات", "کلاس"});
+                for (int i = 0; i < st.students.length(); i++) {
+                    JSONObject o = st.students.optJSONObject(i);
+                    rows.add(new String[]{o.optString("code"), o.optString("first"), o.optString("last"), o.optString("mobile"), o.optString("national"), o.optString("birth"), o.optString("notes"), st.classNameOf(o.optString("code"))});
+                }
+                pendingXlsx = XlsxWriter.build("زبان‌آموزان", rows, new int[]{12, 14, 16, 14, 14, 14, 30, 18});
+            } else {
+                if (st.classes.length() == 0) {
+                    toast("چیزی برای خروجی گرفتن نیست");
+                    return;
+                }
+                rows.add(new String[]{"کد", "نام کلاس", "سطح", "تاریخ شروع", "تاریخ پایان", "روزها", "ساعت", "توضیحات", "روزها و ساعت هر روز", "تعداد زبان‌آموز", "زبان‌آموزان"});
+                for (int i = 0; i < st.classes.length(); i++) {
+                    JSONObject o = st.classes.optJSONObject(i);
+                    JSONArray m = o.optJSONArray("students");
+                    StringBuilder names = new StringBuilder();
+                    int cnt = 0;
+                    for (int k = 0; m != null && k < m.length(); k++) {
+                        for (int q = 0; q < st.students.length(); q++) {
+                            JSONObject s = st.students.optJSONObject(q);
+                            if (s != null && s.optString("code").equals(m.optString(k))) {
+                                if (cnt > 0) names.append("، ");
+                                names.append(s.optString("first")).append(" ").append(s.optString("last"));
+                                cnt++;
+                                break;
+                            }
+                        }
+                    }
+                    String sched = (Cal.sched(o) != null || !o.optString("days").isEmpty() || !o.optString("time").isEmpty()) ? Cal.scheduleText(o) : "";
+                    rows.add(new String[]{o.optString("code"), o.optString("name"), o.optString("level"), o.optString("start"), o.optString("end"), o.optString("days"), o.optString("time"), o.optString("notes"), sched, String.valueOf(cnt), names.toString()});
+                }
+                pendingXlsx = XlsxWriter.build("کلاس‌ها", rows, new int[]{12, 22, 14, 14, 14, 22, 14, 30, 40, 12, 60});
+            }
+        } catch (Exception e) {
+            toast("ساخت فایل Excel ممکن نشد");
+            return;
+        }
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        i.putExtra(Intent.EXTRA_TITLE, (students ? "students-" : "classes-") + new SimpleDateFormat("yyyyMMdd", Locale.US).format(new Date()) + ".xlsx");
+        startActivityForResult(i, PICK_XLSX);
+    }
+
+    void writeXlsx(Uri u) throws Exception {
+        try (OutputStream out = getContentResolver().openOutputStream(u, "wt")) {
+            if (out == null || pendingXlsx == null) throw new IOException("امکان نوشتن در فایل نیست");
+            out.write(pendingXlsx);
+        }
+        toast("فایل Excel ذخیره شد");
     }
 
     void writeImage(Uri u) throws Exception {
@@ -1740,7 +2349,7 @@ public class MainActivity extends Activity {
         StringBuilder t = new StringBuilder(periodTitle(days) + " — " + s.optString("first") + " " + s.optString("last") + "\n");
         String cls = st.classNameOf(s.optString("code"));
         if (!cls.isEmpty()) t.append("کلاس: ").append(cls).append("\n");
-        String note = st.note("studentNote" + days + "_" + s.optString("code"));
+        String note = st.note("studentNote" + noteKey(days) + "_" + s.optString("code"));
         if (!note.trim().isEmpty()) t.append("\nتوضیحات: ").append(note.trim()).append("\n");
         t.append("\n");
         return t.append(o.details).toString();
@@ -1764,8 +2373,8 @@ public class MainActivity extends Activity {
         }
         if (cls.isEmpty()) head.append("\nℹ️ این زبان‌آموز در هیچ کلاسی نیست؛ «حاضر بدون ذکر نام» فقط برای اعضای کلاس محاسبه می‌شود.");
         if (!head.toString().trim().isEmpty()) text(head.toString().trim(), 14);
-        noteEditor("studentNote" + days + "_" + s.optString("code"));
-        final String fname = (days == 7 ? "weekly-" : "monthly-") + (first + "-" + last).replace(' ', '_');
+        noteEditor("studentNote" + noteKey(days) + "_" + s.optString("code"));
+        final String fname = filePrefix(days) + "-" + (first + "-" + last).replace(' ', '_');
         exportButtons(fname, () -> studentText(fsi, days, p, heads));
         imageButtons(fname, () -> studentText(fsi, days, p, heads));
         backBtn();
@@ -1979,6 +2588,7 @@ public class MainActivity extends Activity {
         base("تنظیمات", this::home);
         btn("👩‍🏫 معلم‌ها", x -> listEditor("معلم‌ها", "نام هر معلم در یک خط", st.teachers(), 0));
         btn("☑️ توضیحات آماده وضعیت بچه‌ها (تا ۸ مورد)", x -> listEditor("توضیحات آماده", "هر توضیح در یک خط (حداکثر ۸ مورد)", st.options(), Store.MAX_OPTIONS));
+        btn("💬 پیام‌های آماده به والدین", x -> messageEditor());
         if (st.manager()) {
             btn("👔 حالت مدیر: روشن (برای خاموش کردن بزنید)", x -> {
                 st.setManager(false);
@@ -1991,10 +2601,21 @@ public class MainActivity extends Activity {
                 else passwordDialog(false);
             });
         }
+        btn("🕘 نسخه‌های خودکار (" + Backup.list(this).size() + ")", x -> autoBackups());
         btn("💾 پشتیبان‌گیری از داده‌ها", x -> backup());
         btn("♻️ بازیابی / ادغام پشتیبان", x -> pick(PICK_BACKUP));
-        btn("ℹ️ درباره برنامه", x -> info("کلاس 1.9", "عامل سبک مدیریت آموزشگاه زبان\nAndroid اول، iOS در مرحله بعد\nداده‌ها روی خود گوشی نگهداری می‌شوند."));
+        btn("ℹ️ درباره برنامه", x -> info("کلاس " + versionName(), "برنامهٔ سبک مدیریت آموزشگاه زبان\nاندروید و آیفون (نسخهٔ وب)\nداده‌ها روی خود گوشی نگهداری می‌شوند."));
         backBtn();
+    }
+
+    /** The installed version, read from the package so it can never drift from build.gradle again. */
+    String versionName() {
+        try {
+            String v = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+            return v == null || v.isEmpty() ? "1.11" : v;
+        } catch (Exception e) {
+            return "1.11";
+        }
     }
 
     EditText pinEdit(String hint) {
@@ -2067,8 +2688,29 @@ public class MainActivity extends Activity {
         });
     }
 
-    /** One item per line; max == 0 means unlimited. Teachers and remark options share this editor. */
-    void listEditor(final String title, String hint, List<String> cur, final int max) {
+    /** Edits the prepared parent messages, one "title|text" per line. */
+    void messageEditor() {
+        final EditText e = edit("هر پیام در یک خط: عنوان|متن\nجای‌نگهدارها: {نام} {کلاس} {مانده}", joinLines(st.messages()), true);
+        e.setMinLines(10);
+        LinearLayout l = form();
+        l.addView(e);
+        formDialog("پیام‌های آماده", l, () -> {
+            List<String> out = new ArrayList<>();
+            for (String line : e.getText().toString().split("\\r?\\n")) {
+                String t = line.trim();
+                if (!t.isEmpty() && t.contains("|") && !out.contains(t)) out.add(t);
+            }
+            if (out.isEmpty()) {
+                toast("حداقل یک پیام با قالب «عنوان|متن» بنویسید");
+                return false;
+            }
+            st.setMessages(out);
+            toast("ذخیره شد");
+            return true;
+        });
+    }
+
+    /** One item per line; max == 0 means unlimited. Teachers and remark options share this editor. */    void listEditor(final String title, String hint, List<String> cur, final int max) {
         final EditText e = edit(hint, joinLines(cur), true);
         e.setMinLines(8);
         LinearLayout l = form();
@@ -2111,6 +2753,7 @@ public class MainActivity extends Activity {
             if (out == null) throw new IOException("امکان نوشتن در فایل نیست");
             out.write(payload.getBytes(StandardCharsets.UTF_8));
         }
+        Backup.setLastExport(this, System.currentTimeMillis());
         toast("پشتیبان با موفقیت ذخیره شد");
     }
 
@@ -2132,6 +2775,7 @@ public class MainActivity extends Activity {
                         + "جایگزینی: اطلاعات فعلی کاملاً با فایل عوض می‌شود.")
                 .setPositiveButton("ادغام", (d, w) -> {
                     try {
+                        Backup.take(this, st, "before-restore"); // the state before this merge can always be recovered
                         Merge.Result m = Merge.into(st, r);
                         home();
                         info("نتیجه ادغام", m.summary());
@@ -2140,6 +2784,7 @@ public class MainActivity extends Activity {
                     }
                 })
                 .setNeutralButton("جایگزینی", (d, w) -> confirm("جایگزینی کامل", "اطلاعات فعلی حذف و با فایل عوض می‌شود. ادامه؟", "جایگزین", () -> {
+                    Backup.take(this, st, "before-restore");
                     st.replaceWith(r);
                     toast("بازیابی با موفقیت انجام شد");
                     home();
@@ -2162,6 +2807,8 @@ public class MainActivity extends Activity {
                 case PICK_SAVE_BACKUP: writeBackup(u); break;
                 case PICK_EXPORT: writeExport(u); break;
                 case PICK_IMAGE: writeImage(u); break;
+                case PICK_XLSX: writeXlsx(u); break;
+                case PICK_PDF: writePdf(u); break;
                 case PICK_FIN_SAVE: cal().writeFinBackup(u); break;
                 case PICK_FIN_RESTORE: cal().restoreFin(u); break;
                 case PICK_REPORT: importReportTxt(u); break;

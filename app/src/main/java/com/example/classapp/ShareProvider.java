@@ -46,7 +46,8 @@ public class ShareProvider extends ContentProvider {
 
     @Override
     public String getType(Uri uri) {
-        return "image/png";
+        String n = uri.getLastPathSegment();
+        return n != null && n.endsWith(".pdf") ? "application/pdf" : "image/png";
     }
 
     @Override
